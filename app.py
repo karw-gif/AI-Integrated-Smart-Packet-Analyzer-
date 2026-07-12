@@ -607,12 +607,17 @@ elif analysis_mode == "🔌 Live Interface Capture":
         
         try:
             if NFSTREAM_AVAILABLE:
-                # Initiate NFStreamer on the network interface
+                # Initiate NFStreamer on the network interface.
+                # Short timeouts so flows appear within seconds during a live
+                # demo (NFStream's defaults hold flows for 120s of idle time
+                # before releasing them, which looks like a frozen dashboard).
                 streamer = NFStreamer(
                     source=interface_name,
                     udps=SecurityPlugin(),
                     statistical_analysis=True,
-                    promiscuous_mode=True
+                    promiscuous_mode=True,
+                    idle_timeout=10,
+                    active_timeout=30
                 )
             else:
                 # Scapy fallback: capture a batch of packets, then aggregate to flows
