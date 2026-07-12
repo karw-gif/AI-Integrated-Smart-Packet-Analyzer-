@@ -30,7 +30,7 @@ except ImportError:
 
 # Page Config
 st.set_page_config(
-    page_title="Antigravity CyberNetwork Analyzer",
+    page_title="CyberNetwork Intrusion Detection System",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded"
