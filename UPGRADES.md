@@ -119,6 +119,23 @@ every commit instead.
 UNSW-NB15 normal medians (DNS lookup, full HTTP session with realistic sizes, latency and
 bursty jitter) plus a 10-port SYN scan. Used by CI and handy for live demos of the PCAP mode.
 
+### 🔧 Fixed: the NFStream plugin had never actually worked
+Real-Linux testing revealed that the original `SecurityPlugin` used packet attributes that do
+not exist in NFStream's API (`ip_ttl`, `tcp_window`, `tcp_seq`, `tcp_flags`) — every capture
+process crashed the moment a packet arrived, so the PCAP and live-capture modes had never
+successfully run. The rewritten plugin (`nfplugin.py`) parses TTL, window size and sequence
+numbers directly from the raw IPv4/IPv6 header bytes and rebuilds the flags byte from
+NFStream's boolean flag fields. Verified working on a physical Linux machine (live Wi-Fi
+capture) and in CI.
+
+### ⚠️ Known limitation: domain shift on modern live traffic
+The model is trained on 2015-era UNSW-NB15 traffic. Modern browsing is dominated by
+QUIC/HTTP3 (encrypted UDP on port 443), which did not exist in 2015, so short QUIC flow
+fragments are often flagged as suspicious while large complete flows classify correctly.
+Mitigation for live monitoring: raise the alert-confidence threshold (≥0.95) and prefer
+longer flow timeouts. This is an inherent limitation of *every* IDS trained on this dataset —
+recognizing and explaining it is part of the project's contribution.
+
 ### 🐳 Docker deployment
 A `Dockerfile` ships the full Linux stack (NFStream included) for one-command deployment:
 `docker build -t nids . && docker run --rm -p 8501:8501 nids`.
