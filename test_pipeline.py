@@ -14,11 +14,7 @@ class MockFlow:
 def main():
     print("Initializing FeatureExtractor...")
     try:
-        extractor = FeatureExtractor(
-            model_path='xgboost_network_model.pkl',
-            encoders_path='label_encoders.pkl',
-            columns_path='feature_columns.pkl'
-        )
+        extractor = FeatureExtractor()
         print("FeatureExtractor loaded successfully!")
     except Exception as e:
         print(f"Error loading model/artifacts: {e}")
@@ -56,6 +52,7 @@ def main():
     res = extractor.predict_flow(normal_dns_flow)
     print("Prediction Result:")
     print(f"  Label: {res['label']} ({'Attack' if res['label'] == 1 else 'Normal'})")
+    print(f"  Attack Category: {res['attack_cat']}")
     print(f"  Confidence: {res['confidence']:.4f}")
     print(f"  Mapped Features (sample):")
     for k in ['dur', 'proto', 'service', 'state', 'spkts', 'dpkts', 'sbytes', 'dbytes', 'rate', 'sttl', 'ct_srv_dst']:
@@ -92,6 +89,7 @@ def main():
     res2 = extractor.predict_flow(malicious_flow)
     print("Prediction Result:")
     print(f"  Label: {res2['label']} ({'Attack' if res2['label'] == 1 else 'Normal'})")
+    print(f"  Attack Category: {res2['attack_cat']}")
     print(f"  Confidence: {res2['confidence']:.4f}")
     print(f"  Mapped Features (sample):")
     for k in ['dur', 'proto', 'service', 'state', 'spkts', 'dpkts', 'sbytes', 'dbytes', 'rate', 'sttl', 'ct_srv_dst']:

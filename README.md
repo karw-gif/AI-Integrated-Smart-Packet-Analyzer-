@@ -8,8 +8,14 @@ A real-time machine learning-powered Network Intrusion Detection System (NIDS) b
 - **Offline PCAP Auditing**: Upload any `.pcap` or `.pcapng` file to perform a retrospective security audit of connection records.
 - **Real-Time Simulation (Demo Mode)**: Replays flows directly from the UNSW-NB15 test dataset, demonstrating classification, alerts, and time-series charts without requiring elevated capture permissions or active traffic.
 - **Dynamic Flow Analyzer**: Maintains a sliding memory window of connections to calculate count-based statistics (like `ct_srv_dst`, `ct_dst_src_ltm`) in real-time.
-- **Interactive Inspector**: Inspect any flow in detail, displaying all 42 base and engineered features fed into the ML model alongside classification confidence levels.
-- **Aesthetic Cyber Dashboard**: Features dark-mode styling, threat distribution charts, active security alert logs, and bandwidth metrics.
+- **Interactive Inspector**: Inspect any flow in detail, displaying all base and engineered features fed into the ML model alongside classification confidence levels.
+- **Attack-Type Classification**: A second multi-class XGBoost model names the category of each detected intrusion (DoS, Exploits, Reconnaissance, Fuzzers, Backdoor, Shellcode, Worms, …) with a severity triage level (HIGH / MEDIUM / LOW).
+- **Explainable AI**: Every inspected flow shows a SHAP-style feature-contribution chart explaining exactly why the model classified it as attack or normal.
+- **Model Performance Report**: An in-app page with held-out evaluation metrics — confusion matrix, precision/recall per attack class, ROC-AUC, and feature importances.
+- **CSV Report Export**: Download full flow and alerts-only reports from any analysis session.
+- **Aesthetic Cyber Dashboard**: Dark-mode styling, threat distribution charts, active security alert logs, bandwidth metrics — fully **mobile-responsive**.
+
+> 📋 See [UPGRADES.md](UPGRADES.md) for a complete record of what the original build contained, the critical bugs that were fixed (dataset artifact false-positives, model version skew, train/test file swap), and every capability added on top.
 
 ---
 
@@ -27,15 +33,35 @@ The project bridges the gap between raw network packets and machine learning fea
 
 ### Prerequisites
 - Python 3.10+
-- Linux environment (for live network capturing capabilities)
+- Works on **Windows, Linux, and macOS**:
+  - **Linux/macOS** — install `nfstream` for the full DPI capture engine
+  - **Windows** — the bundled Scapy engine handles PCAP analysis natively; install [Npcap](https://npcap.com) for live capture
+- The app auto-detects the best available engine and shows which one is active
+
+### Run on Linux via Docker
+```bash
+docker build -t nids .
+docker run --rm -p 8501:8501 nids
+```
+
+### Continuous Linux testing
+Every push to `main` triggers a GitHub Actions workflow that tests the complete
+NFStream + Scapy + model pipeline on Ubuntu — see `.github/workflows/linux-test.yml`.
 
 ### Dependencies
 Install the required python packages:
 ```bash
-pip install pandas scikit-learn streamlit nfstream xgboost
+pip install -r requirements.txt
 ```
 
-*(Note: If you run into a timeout or constraint, you can install xgboost without GPU dependencies using `pip install xgboost --no-deps`)*
+*(`nfstream` is optional and only needed for PCAP/live-capture modes; the simulator and performance report work without it.)*
+
+### Retrain the Models (reproducible)
+All model artifacts can be rebuilt from the raw CSVs in one command:
+```bash
+python3 train_model.py
+```
+This trains the binary intrusion model and the multi-class attack categorizer, evaluates them on the held-out 82k-flow test split, and writes `xgboost_network_model.json`, `xgboost_attack_model.json`, the encoders, and `model_metrics.pkl`.
 
 ### Run the CLI Test Pipeline
 Verify that feature mapping and ML predictions run correctly:

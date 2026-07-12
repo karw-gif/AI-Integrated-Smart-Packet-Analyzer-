@@ -1,0 +1,11 @@
+pandas
+numpy
+scikit-learn
+xgboost
+joblib
+streamlit
+altair
+scapy
+# Optional — preferred capture engine with DPI, Linux/macOS only
+# (the app falls back to the Scapy engine automatically when missing):
+# nfstream

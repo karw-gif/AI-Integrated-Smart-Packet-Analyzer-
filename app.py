@@ -18,6 +18,14 @@ except ImportError:
     class NFPlugin:
         pass
 
+# Cross-platform fallback engine (pure-Python Scapy) so PCAP analysis and
+# basic live capture also work on Windows, where NFStream cannot build.
+try:
+    from packet_engine import read_pcap as scapy_read_pcap, sniff_live as scapy_sniff_live
+    SCAPY_AVAILABLE = True
+except ImportError:
+    SCAPY_AVAILABLE = False
+
 # Define Custom NFStream Plugin to extract TCP handshake metrics and TTLs
 if NFSTREAM_AVAILABLE:
     class SecurityPlugin(NFPlugin):
@@ -118,6 +126,55 @@ st.markdown("""
         text-transform: uppercase;
         letter-spacing: 0.05em;
     }
+
+    /* Severity badges */
+    .sev-high { color: #ef4444; font-weight: bold; }
+    .sev-med  { color: #f59e0b; font-weight: bold; }
+    .sev-low  { color: #10b981; font-weight: bold; }
+
+    /* ---- Mobile responsiveness ---- */
+    @media (max-width: 768px) {
+        h1.cyber-title, .cyber-title {
+            font-size: 1.3rem !important;
+            text-shadow: 0 0 6px #00ffcc;
+            margin-bottom: 12px;
+            padding-top: 0 !important;
+        }
+        .metric-container {
+            padding: 10px 6px;
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+        .metric-value {
+            font-size: 1.3rem;
+        }
+        .metric-label {
+            font-size: 0.62rem;
+            letter-spacing: 0.02em;
+        }
+        /* Stack Streamlit columns vertically on small screens */
+        div[data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap;
+        }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+            flex: 1 1 45% !important;
+            min-width: 45% !important;
+        }
+        /* Reduce main padding so tables get full width */
+        section.main > div.block-container,
+        div[data-testid="stMainBlockContainer"] {
+            padding-left: 0.6rem !important;
+            padding-right: 0.6rem !important;
+            padding-top: 2.2rem !important;
+        }
+    }
+    @media (max-width: 480px) {
+        h1.cyber-title, .cyber-title { font-size: 1.05rem !important; }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+            flex: 1 1 100% !important;
+            min-width: 100% !important;
+        }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -126,11 +183,7 @@ st.markdown("<h1 class='cyber-title'>🛡️ CYBER-NETWORK INTRUSION DETECTION S
 # Cache model loading
 @st.cache_resource
 def load_feature_extractor():
-    return FeatureExtractor(
-        model_path='xgboost_network_model.pkl',
-        encoders_path='label_encoders.pkl',
-        columns_path='feature_columns.pkl'
-    )
+    return FeatureExtractor()
 
 try:
     extractor = load_feature_extractor()
@@ -143,7 +196,8 @@ except Exception as e:
 st.sidebar.title("Configuration Panel")
 analysis_mode = st.sidebar.selectbox(
     "Choose Analysis Mode",
-    ["🖥️ Simulator (Demo Mode)", "📂 Offline PCAP Analysis", "🔌 Live Interface Capture"]
+    ["🖥️ Simulator (Demo Mode)", "📂 Offline PCAP Analysis", "🔌 Live Interface Capture",
+     "📊 Model Performance Report"]
 )
 
 # Confidence Threshold Slider
@@ -175,6 +229,58 @@ def clear_session_data():
     st.session_state.flows = []
     st.session_state.alerts = []
     st.session_state.total_bytes = 0
+
+def severity_of(pred):
+    """Derive a human severity level from attack category + model confidence."""
+    if pred['label'] == 0:
+        return '—'
+    high_cats = {'Exploits', 'Backdoor', 'Shellcode', 'Worms', 'DoS'}
+    if pred['attack_cat'] in high_cats or pred['confidence'] >= 0.95:
+        return '🔴 HIGH'
+    if pred['confidence'] >= 0.85:
+        return '🟠 MEDIUM'
+    return '🟡 LOW'
+
+def build_flow_info(flow_src, pred, threshold, with_timestamp=True):
+    """Common display record for simulator / PCAP / live flows."""
+    is_alert = pred['label'] == 1 and pred['confidence'] >= threshold
+    info = {
+        'src_ip': flow_src.src_ip,
+        'src_port': flow_src.src_port,
+        'dst_ip': flow_src.dst_ip,
+        'dst_port': flow_src.dst_port,
+        'protocol': 'TCP' if flow_src.protocol == 6 else ('UDP' if flow_src.protocol == 17 else 'ICMP'),
+        'service': pred['features']['service'],
+        'duration': f"{pred['features']['dur']:.6f}s",
+        'bytes': pred['features']['sbytes'] + pred['features']['dbytes'],
+        'prediction': '🚨 ATTACK' if is_alert else '🟢 NORMAL',
+        'attack_type': pred['attack_cat'] if is_alert else '—',
+        'severity': severity_of(pred) if is_alert else '—',
+        'confidence': f"{pred['confidence']*100:.2f}%",
+        'raw_confidence': pred['confidence'],
+        'raw_label': pred['label'],
+        'details': pred['features']
+    }
+    if with_timestamp:
+        info = {'timestamp': time.strftime("%H:%M:%S"), **info}
+    return info
+
+def export_buttons(key_prefix):
+    """CSV download buttons for the current flows and alerts."""
+    if not st.session_state.flows:
+        return
+    exp_col1, exp_col2 = st.columns(2)
+    df_all = pd.DataFrame(st.session_state.flows).drop(columns=['details'], errors='ignore')
+    with exp_col1:
+        st.download_button("⬇️ Export Flow Report (CSV)", df_all.to_csv(index=False),
+                           file_name="nids_flow_report.csv", mime="text/csv",
+                           key=f"{key_prefix}_flows", use_container_width=True)
+    if st.session_state.alerts:
+        df_al = pd.DataFrame(st.session_state.alerts).drop(columns=['details'], errors='ignore')
+        with exp_col2:
+            st.download_button("⬇️ Export Alerts Report (CSV)", df_al.to_csv(index=False),
+                               file_name="nids_alerts_report.csv", mime="text/csv",
+                               key=f"{key_prefix}_alerts", use_container_width=True)
 
 # Dashboard Layout Elements
 m_col1, m_col2, m_col3, m_col4 = st.columns(4)
@@ -251,8 +357,13 @@ if analysis_mode == "🖥️ Simulator (Demo Mode)":
         # Load sample data
         @st.cache_data
         def load_simulator_dataset():
-            df = pd.read_csv('data/NB_testing-set.csv')
-            return df
+            # NOTE: despite its filename, NB_training-set.csv holds the official
+            # 82k UNSW-NB15 *testing* split (the shipped files are swapped).
+            # We stream the held-out split so the model never sees its own
+            # training data during the demo.
+            df = pd.read_csv('data/NB_training-set.csv')
+            # Shuffle so attacks and normal traffic interleave realistically
+            return df.sample(frac=1.0, random_state=7).reset_index(drop=True)
         
         try:
             sim_df = load_simulator_dataset()
@@ -333,24 +444,7 @@ if analysis_mode == "🖥️ Simulator (Demo Mode)":
             
             # Predict
             pred = extractor.predict_flow(mock_flow)
-            
-            # Format display record
-            flow_info = {
-                'timestamp': time.strftime("%H:%M:%S"),
-                'src_ip': mock_flow.src_ip,
-                'src_port': mock_flow.src_port,
-                'dst_ip': mock_flow.dst_ip,
-                'dst_port': mock_flow.dst_port,
-                'protocol': 'TCP' if mock_flow.protocol == 6 else ('UDP' if mock_flow.protocol == 17 else 'ICMP'),
-                'service': pred['features']['service'],
-                'duration': f"{pred['features']['dur']:.6f}s",
-                'bytes': pred['features']['sbytes'] + pred['features']['dbytes'],
-                'prediction': '🚨 ATTACK' if (pred['label'] == 1 and pred['confidence'] >= confidence_threshold) else '🟢 NORMAL',
-                'confidence': f"{pred['confidence']*100:.2f}%",
-                'raw_confidence': pred['confidence'],
-                'raw_label': pred['label'],
-                'details': pred['features']
-            }
+            flow_info = build_flow_info(mock_flow, pred, confidence_threshold)
             
             st.session_state.flows.append(flow_info)
             st.session_state.total_bytes += flow_info['bytes']
@@ -388,31 +482,38 @@ if analysis_mode == "🖥️ Simulator (Demo Mode)":
             
             # Update Alerts Table
             if st.session_state.alerts:
-                df_alerts = pd.DataFrame(st.session_state.alerts)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'confidence']]
+                df_alerts = pd.DataFrame(st.session_state.alerts)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'attack_type', 'severity', 'confidence']]
                 alerts_table_placeholder.dataframe(df_alerts.tail(10), use_container_width=True)
             else:
                 alerts_table_placeholder.info("No security alerts triggered.")
                 
             # Update Flows Table
-            df_display = df_flows[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'confidence']]
+            df_display = df_flows[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'attack_type', 'confidence']]
             flows_table_placeholder.dataframe(df_display.tail(15), use_container_width=True)
             
             idx += 1
             time.sleep(sim_speed)
-            
+
             # Handle manual stop via session state
             if stop_sim:
                 st.session_state.running = False
                 status_box.warning("Simulation stopped.")
                 break
 
+    # Offer CSV exports of whatever has been analyzed so far
+    export_buttons("sim")
+
 elif analysis_mode == "📂 Offline PCAP Analysis":
     st.subheader("📁 Offline Packet Capture Audit")
-    
-    if not NFSTREAM_AVAILABLE:
-        st.error("❌ NFStream is not installed or failed to compile on this system. PCAP parsing is disabled.")
+
+    if NFSTREAM_AVAILABLE:
+        st.caption("Engine: **NFStream** (Deep Packet Inspection)")
+    elif SCAPY_AVAILABLE:
+        st.caption("Engine: **Scapy** (cross-platform fallback — NFStream not available on this OS)")
+    else:
+        st.error("❌ Neither NFStream nor Scapy is installed. Run `pip install scapy` to enable PCAP parsing.")
         st.stop()
-        
+
     pcap_file = st.file_uploader("Upload a network capture file (.pcap or .pcapng)", type=["pcap", "pcapng"])
     
     if pcap_file is not None:
@@ -429,35 +530,22 @@ elif analysis_mode == "📂 Offline PCAP Analysis":
         
         # Analyze PCAP
         try:
-            # We instantiate NFStreamer with our SecurityPlugin to collect TCP handshakes and TTLs
-            streamer = NFStreamer(
-                source=tmp_path,
-                udps=SecurityPlugin(),
-                statistical_analysis=True
-            )
-            
+            if NFSTREAM_AVAILABLE:
+                # We instantiate NFStreamer with our SecurityPlugin to collect TCP handshakes and TTLs
+                streamer = NFStreamer(
+                    source=tmp_path,
+                    udps=SecurityPlugin(),
+                    statistical_analysis=True
+                )
+            else:
+                streamer = scapy_read_pcap(tmp_path)
+
             flows_list = []
             alerts_list = []
-            
+
             for flow in streamer:
                 pred = extractor.predict_flow(flow)
-                
-                flow_info = {
-                    'src_ip': flow.src_ip,
-                    'src_port': flow.src_port,
-                    'dst_ip': flow.dst_ip,
-                    'dst_port': flow.dst_port,
-                    'protocol': 'TCP' if flow.protocol == 6 else ('UDP' if flow.protocol == 17 else 'ICMP'),
-                    'service': pred['features']['service'],
-                    'duration': f"{pred['features']['dur']:.6f}s",
-                    'bytes': pred['features']['sbytes'] + pred['features']['dbytes'],
-                    'prediction': '🚨 ATTACK' if (pred['label'] == 1 and pred['confidence'] >= confidence_threshold) else '🟢 NORMAL',
-                    'confidence': f"{pred['confidence']*100:.2f}%",
-                    'raw_confidence': pred['confidence'],
-                    'raw_label': pred['label'],
-                    'details': pred['features']
-                }
-                
+                flow_info = build_flow_info(flow, pred, confidence_threshold, with_timestamp=False)
                 flows_list.append(flow_info)
                 st.session_state.total_bytes += flow_info['bytes']
                 if pred['label'] == 1 and pred['confidence'] >= confidence_threshold:
@@ -497,14 +585,15 @@ elif analysis_mode == "📂 Offline PCAP Analysis":
                 
                 st.markdown("### 🚨 Intrusion Alerts triggered")
                 if alerts_list:
-                    df_a = pd.DataFrame(alerts_list)[['src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'confidence']]
+                    df_a = pd.DataFrame(alerts_list)[['src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'attack_type', 'severity', 'confidence']]
                     st.dataframe(df_a, use_container_width=True)
                 else:
                     st.info("No security anomalies detected in this capture file.")
-                    
+
                 st.markdown("### 🔍 Full Flow Explorer")
-                df_disp = df_pcap[['src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'confidence']]
+                df_disp = df_pcap[['src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'attack_type', 'confidence']]
                 st.dataframe(df_disp, use_container_width=True)
+                export_buttons("pcap")
                 
         except Exception as e:
             st.error(f"Error parsing PCAP: {e}")
@@ -515,15 +604,20 @@ elif analysis_mode == "📂 Offline PCAP Analysis":
 
 elif analysis_mode == "🔌 Live Interface Capture":
     st.subheader("🔌 Real-time Live Network Capture")
-    
-    if not NFSTREAM_AVAILABLE:
-        st.error("❌ NFStream is not installed or failed to compile on this system. Live capture is disabled.")
+
+    if NFSTREAM_AVAILABLE:
+        st.caption("Engine: **NFStream** (streaming flows with DPI)")
+    elif SCAPY_AVAILABLE:
+        st.caption("Engine: **Scapy** (cross-platform fallback — captures in batches). "
+                   "On Windows this requires [Npcap](https://npcap.com) to be installed.")
+    else:
+        st.error("❌ Neither NFStream nor Scapy is installed. Run `pip install scapy` to enable live capture.")
         st.stop()
-        
+
     st.warning(
         "⚠️ **Permissions Notice**: Live capture requires net_raw capabilities. "
         "If you are running in a standard user space or container, this might fail "
-        "unless the application has appropriate permissions (e.g., sudo)."
+        "unless the application has appropriate permissions (e.g., sudo / Npcap)."
     )
     
     if_col1, if_col2 = st.columns([2, 1])
@@ -558,35 +652,28 @@ elif analysis_mode == "🔌 Live Interface Capture":
         live_flows_table = st.empty()
         
         try:
-            # Initiate NFStreamer on the network interface
-            streamer = NFStreamer(
-                source=interface_name,
-                udps=SecurityPlugin(),
-                statistical_analysis=True,
-                promiscuous_mode=True
-            )
-            
+            if NFSTREAM_AVAILABLE:
+                # Initiate NFStreamer on the network interface
+                streamer = NFStreamer(
+                    source=interface_name,
+                    udps=SecurityPlugin(),
+                    statistical_analysis=True,
+                    promiscuous_mode=True
+                )
+            else:
+                # Scapy fallback: capture a batch of packets, then aggregate to flows
+                with st.spinner("Capturing packets (up to 30s or 500 packets)..."):
+                    streamer = scapy_sniff_live(
+                        interface=interface_name if interface_name not in ("", "lo") else None,
+                        packet_count=500,
+                        timeout=30
+                    )
+                st.info(f"Captured and aggregated {len(streamer)} flows.")
+
             count = 0
             for flow in streamer:
                 pred = extractor.predict_flow(flow)
-                
-                flow_info = {
-                    'timestamp': time.strftime("%H:%M:%S"),
-                    'src_ip': flow.src_ip,
-                    'src_port': flow.src_port,
-                    'dst_ip': flow.dst_ip,
-                    'dst_port': flow.dst_port,
-                    'protocol': 'TCP' if flow.protocol == 6 else ('UDP' if flow.protocol == 17 else 'ICMP'),
-                    'service': pred['features']['service'],
-                    'duration': f"{pred['features']['dur']:.6f}s",
-                    'bytes': pred['features']['sbytes'] + pred['features']['dbytes'],
-                    'prediction': '🚨 ATTACK' if (pred['label'] == 1 and pred['confidence'] >= confidence_threshold) else '🟢 NORMAL',
-                    'confidence': f"{pred['confidence']*100:.2f}%",
-                    'raw_confidence': pred['confidence'],
-                    'raw_label': pred['label'],
-                    'details': pred['features']
-                }
-                
+                flow_info = build_flow_info(flow, pred, confidence_threshold)
                 st.session_state.flows.append(flow_info)
                 st.session_state.total_bytes += flow_info['bytes']
                 if pred['label'] == 1 and pred['confidence'] >= confidence_threshold:
@@ -623,12 +710,12 @@ elif analysis_mode == "🔌 Live Interface Capture":
                 
                 # Live Tables
                 if st.session_state.alerts:
-                    df_la = pd.DataFrame(st.session_state.alerts)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'confidence']]
+                    df_la = pd.DataFrame(st.session_state.alerts)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'attack_type', 'severity', 'confidence']]
                     live_alerts_table.dataframe(df_la.tail(8), use_container_width=True)
                 else:
                     live_alerts_table.info("Listening... No threats detected yet.")
-                    
-                df_lf = pd.DataFrame(st.session_state.flows)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'confidence']]
+
+                df_lf = pd.DataFrame(st.session_state.flows)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'attack_type', 'confidence']]
                 live_flows_table.dataframe(df_lf.tail(12), use_container_width=True)
                 
                 count += 1
@@ -639,6 +726,91 @@ elif analysis_mode == "🔌 Live Interface Capture":
         except Exception as e:
             st.error(f"Error during live capture: {e}")
             st.info("Check interface name or permissions. Make sure to run Streamlit with sufficient capture privileges.")
+
+elif analysis_mode == "📊 Model Performance Report":
+    st.subheader("📊 Model Evaluation on Held-Out UNSW-NB15 Test Data")
+    st.write(
+        "These metrics were computed on **82,332 flows the model never saw during training**, "
+        "so they reflect true generalization performance rather than memorization."
+    )
+
+    import joblib as _joblib
+    try:
+        mm = _joblib.load('model_metrics.pkl')
+    except Exception as e:
+        st.error(f"model_metrics.pkl not found — run `py train_model.py` first. ({e})")
+        st.stop()
+
+    b = mm['binary']
+    p_col1, p_col2, p_col3, p_col4 = st.columns(4)
+    for col, (label, val) in zip(
+        [p_col1, p_col2, p_col3, p_col4],
+        [("Accuracy", b['accuracy']), ("Precision", b['precision']),
+         ("Recall (Detection Rate)", b['recall']), ("ROC-AUC", b['roc_auc'])]):
+        with col:
+            st.markdown(f"""
+            <div class="metric-container">
+                <div class="metric-value safe">{val*100:.2f}%</div>
+                <div class="metric-label">{label}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("")
+    perf_c1, perf_c2 = st.columns(2)
+
+    with perf_c1:
+        st.markdown("### Confusion Matrix")
+        cm = b['confusion_matrix']
+        cm_df = pd.DataFrame([
+            {'Actual': 'Normal', 'Predicted': 'Normal', 'count': cm[0][0]},
+            {'Actual': 'Normal', 'Predicted': 'Attack', 'count': cm[0][1]},
+            {'Actual': 'Attack', 'Predicted': 'Normal', 'count': cm[1][0]},
+            {'Actual': 'Attack', 'Predicted': 'Attack', 'count': cm[1][1]},
+        ])
+        cm_chart = alt.Chart(cm_df).mark_rect().encode(
+            x=alt.X('Predicted:N'),
+            y=alt.Y('Actual:N'),
+            color=alt.Color('count:Q', scale=alt.Scale(scheme='tealblues'), legend=None),
+        ).properties(height=260)
+        cm_text = alt.Chart(cm_df).mark_text(fontSize=18, fontWeight='bold', color='white').encode(
+            x='Predicted:N', y='Actual:N', text='count:Q'
+        )
+        st.altair_chart(cm_chart + cm_text, use_container_width=True)
+        st.caption(f"Attack detection rate: {b['recall']*100:.1f}% — only "
+                   f"{cm[1][0]:,} of {cm[1][0]+cm[1][1]:,} attacks slipped through.")
+
+    with perf_c2:
+        st.markdown("### Top 15 Most Influential Features")
+        imp_df = pd.DataFrame(mm['feature_importances'][:15], columns=['feature', 'importance'])
+        imp_chart = alt.Chart(imp_df).mark_bar().encode(
+            x=alt.X('importance:Q'),
+            y=alt.Y('feature:N', sort='-x'),
+            color=alt.value('#00ffcc'),
+            tooltip=['feature', alt.Tooltip('importance:Q', format='.4f')]
+        ).properties(height=340)
+        st.altair_chart(imp_chart, use_container_width=True)
+
+    st.markdown("### 🎯 Attack Category Classifier (Multi-Class)")
+    st.write(f"A second XGBoost model names the **type** of each detected intrusion "
+             f"(overall accuracy: **{mm['attack_cat_accuracy']*100:.1f}%** across 10 classes).")
+    rep = mm['attack_cat_report']
+    rep_rows = [{'Category': k, 'Precision': f"{v['precision']*100:.1f}%",
+                 'Recall': f"{v['recall']*100:.1f}%", 'F1': f"{v['f1-score']*100:.1f}%",
+                 'Test Samples': int(v['support'])}
+                for k, v in rep.items() if isinstance(v, dict) and k not in ('macro avg', 'weighted avg')]
+    st.dataframe(pd.DataFrame(rep_rows), use_container_width=True, hide_index=True)
+
+    with st.expander("🔬 Why we deliberately dropped 7 dataset-artifact features"):
+        st.write(
+            "UNSW-NB15 was generated in a lab where attack traffic used fixed TTL values and "
+            "constant TCP window sizes. Features like `sttl`, `dttl`, `ct_state_ttl`, `swin`, "
+            "`dwin`, `stcpb` and `dtcpb` act as near-perfect separators *inside the dataset* "
+            "but cause severe false positives on real captured traffic (benign DNS lookups were "
+            "flagged as attacks with 99.9% confidence). Removing them cost only "
+            f"**{(mm['binary_all_features']['accuracy']-b['accuracy'])*100:.2f} percentage points** of "
+            "benchmark accuracy while making the model actually usable in live deployment — "
+            "a classic robustness-over-leaderboard tradeoff."
+        )
 
 # Interactive Flow Detail Inspector at the bottom of the page
 st.markdown("---")
@@ -663,8 +835,31 @@ if st.session_state.flows:
             st.markdown(f"**Destination**: `{sel_flow['dst_ip']}:{sel_flow['dst_port']}`")
         with col_d3:
             st.markdown(f"**Classification**: `{sel_flow['prediction']}`")
+            st.markdown(f"**Attack Type**: `{sel_flow.get('attack_type', '—')}` | **Severity**: {sel_flow.get('severity', '—')}")
             st.markdown(f"**Confidence**: `{sel_flow['confidence']}`")
-            
+
+        # Explainable AI: which features pushed this decision?
+        st.markdown("#### 🧠 Explainable AI — Why did the model decide this?")
+        try:
+            contribs = extractor.explain_flow(sel_flow['details'])[:10]
+            expl_df = pd.DataFrame(contribs, columns=['feature', 'contribution'])
+            expl_df['pushes_toward'] = expl_df['contribution'].apply(
+                lambda v: '🚨 Attack' if v > 0 else '🟢 Normal')
+            expl_chart = alt.Chart(expl_df).mark_bar().encode(
+                x=alt.X('contribution:Q', title='Contribution to decision (log-odds)'),
+                y=alt.Y('feature:N', sort=alt.EncodingSortField(field='contribution', op='sum', order='descending')),
+                color=alt.Color('pushes_toward:N',
+                                scale=alt.Scale(domain=['🚨 Attack', '🟢 Normal'],
+                                                range=['#ef4444', '#10b981']),
+                                legend=alt.Legend(title=None, orient='bottom')),
+                tooltip=['feature', alt.Tooltip('contribution:Q', format='.4f')]
+            ).properties(height=280)
+            st.altair_chart(expl_chart, use_container_width=True)
+            st.caption("SHAP-style feature contributions from the XGBoost model: red bars pushed "
+                       "this flow toward ATTACK, green bars toward NORMAL.")
+        except Exception as e:
+            st.info(f"Explanation unavailable for this flow: {e}")
+
         # Display key features
         st.markdown("#### Key Engineered Features")
         feats = sel_flow['details']
@@ -688,8 +883,8 @@ if st.session_state.flows:
             st.metric("ct_dst_src_ltm", feats.get('ct_dst_src_ltm', 1))
             st.metric("ct_src_ltm", feats.get('ct_src_ltm', 1))
             
-        # Expand full 42 features
-        with st.expander("Show all 42 features fed to XGBoost model"):
+        # Expand full engineered feature set
+        with st.expander("Show all engineered flow features"):
             st.json(feats)
 else:
     st.info("No flow data captured yet. Start simulation or upload a PCAP file to explore flow features.")

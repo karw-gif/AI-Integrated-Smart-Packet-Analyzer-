@@ -85,15 +85,30 @@ class FlowMemory:
 class FeatureExtractor:
     """
     Handles feature mapping, encoding, and model inference for cybersecurity threat detection.
+
+    Loads models from XGBoost's native JSON format (version-independent), plus an
+    optional multi-class attack-category model for naming the type of intrusion.
     """
-    def __init__(self, model_path='xgboost_network_model.pkl',
+    def __init__(self, model_path='xgboost_network_model.json',
                  encoders_path='label_encoders.pkl',
-                 columns_path='feature_columns.pkl'):
-        
-        self.model = joblib.load(model_path)
+                 columns_path='feature_columns.pkl',
+                 attack_model_path='xgboost_attack_model.json',
+                 attack_classes_path='attack_classes.pkl'):
+
+        from xgboost import XGBClassifier
+        self.model = XGBClassifier()
+        self.model.load_model(model_path)
         self.label_encoders = joblib.load(encoders_path)
         self.expected_features = joblib.load(columns_path)
         self.memory = FlowMemory(window_size=100)
+
+        # Multi-class attack categorizer (optional)
+        self.attack_model = None
+        self.attack_classes = None
+        if os.path.exists(attack_model_path) and os.path.exists(attack_classes_path):
+            self.attack_model = XGBClassifier()
+            self.attack_model.load_model(attack_model_path)
+            self.attack_classes = joblib.load(attack_classes_path)
 
     def map_nfstream_flow(self, flow):
         """
@@ -183,11 +198,15 @@ class FeatureExtractor:
         smean = flow.src2dst_bytes / (spkts + 1e-6)
         dmean = flow.dst2src_bytes / (dpkts + 1e-6)
 
-        # Inter-packet arrival times (in ms)
+        # Inter-packet arrival times (in ms).
+        # UNSW's sjit/djit come from argus, which accumulates timing deviations
+        # over the whole flow rather than reporting a single stddev — so we
+        # scale the per-gap stddev by the number of gaps to approximate the
+        # same magnitude the model was trained on.
         sinpkt = getattr(flow, 'src2dst_mean_piat_ms', 0.0)
         dinpkt = getattr(flow, 'dst2src_mean_piat_ms', 0.0)
-        sjit = getattr(flow, 'src2dst_stddev_piat_ms', 0.0)
-        djit = getattr(flow, 'dst2src_stddev_piat_ms', 0.0)
+        sjit = getattr(flow, 'src2dst_stddev_piat_ms', 0.0) * max(0, flow.src2dst_packets - 2)
+        djit = getattr(flow, 'dst2src_stddev_piat_ms', 0.0) * max(0, flow.dst2src_packets - 2)
 
         # FTP / HTTP specific features
         is_ftp_login = 1 if service == 'ftp' and (sbytes > 100 or dbytes > 100) else 0
@@ -290,11 +309,42 @@ class FeatureExtractor:
         # 5. Model Inference
         # Get raw probability
         prob = self.model.predict_proba(X)[0][1]
-        label = int(self.model.predict(X)[0])
+        label = int(prob >= 0.5)
+
+        # 6. Attack category (only meaningful when flagged malicious).
+        # If the binary model flags an attack but the categorizer's top class is
+        # 'Normal' (the two models can disagree near the boundary), report the
+        # most likely *attack* category instead.
+        attack_cat = 'Normal'
+        if label == 1 and self.attack_model is not None:
+            cat_probs = self.attack_model.predict_proba(X)[0]
+            order = cat_probs.argsort()[::-1]
+            for idx in order:
+                if self.attack_classes[idx] != 'Normal':
+                    attack_cat = self.attack_classes[idx]
+                    break
 
         return {
             'label': label,
             'confidence': float(prob if label == 1 else 1.0 - prob),
+            'attack_probability': float(prob),
+            'attack_cat': attack_cat,
             'features': flow_data,
             'meta': meta
         }
+
+    def explain_flow(self, flow_features):
+        """
+        Returns the per-feature SHAP-style contributions for a single flow
+        (positive value pushes toward ATTACK, negative toward NORMAL),
+        sorted by absolute impact.
+        """
+        import xgboost as xgb
+        X, _ = self.preprocess(dict(flow_features))
+        booster = self.model.get_booster()
+        contribs = booster.predict(xgb.DMatrix(X, feature_names=self.expected_features),
+                                   pred_contribs=True)[0]
+        # Last element is the bias term
+        pairs = list(zip(self.expected_features, contribs[:-1].tolist()))
+        pairs.sort(key=lambda t: -abs(t[1]))
+        return pairs
