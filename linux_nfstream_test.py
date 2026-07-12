@@ -10,46 +10,9 @@ Run (Linux):  python linux_nfstream_test.py
 """
 import sys
 
-from nfstream import NFStreamer, NFPlugin
+from nfstream import NFStreamer
+from nfplugin import SecurityPlugin
 from feature_extractor import FeatureExtractor
-
-
-class SecurityPlugin(NFPlugin):
-    """Same plugin as app.py: TCP handshake timing, TTLs, windows, flags."""
-
-    def on_init(self, packet, flow):
-        flow.udps.src_ttl = packet.ip_ttl if packet.ip_version else 64
-        flow.udps.dst_ttl = 0
-        flow.udps.src_win = packet.tcp_window if packet.tcp_flags else 0
-        flow.udps.dst_win = 0
-        flow.udps.src_tcp_seq = packet.tcp_seq if packet.tcp_flags else 0
-        flow.udps.dst_tcp_seq = 0
-        flow.udps.tcp_rtt = 0.0
-        flow.udps.synack = 0.0
-        flow.udps.ackdat = 0.0
-        flow.udps.tcp_flags_sum = packet.tcp_flags if packet.tcp_flags else 0
-        flow.udps.handshake_start = packet.time if packet.tcp_flags and (packet.tcp_flags & 0x02) else 0
-        flow.udps.handshake_synack = 0
-        flow.udps.handshake_ack = 0
-
-    def on_update(self, packet, flow):
-        if packet.tcp_flags:
-            flow.udps.tcp_flags_sum |= packet.tcp_flags
-        if packet.direction == 1:
-            if flow.udps.dst_ttl == 0:
-                flow.udps.dst_ttl = packet.ip_ttl if packet.ip_version else 64
-            if packet.tcp_flags:
-                flow.udps.dst_win = packet.tcp_window
-                flow.udps.dst_tcp_seq = packet.tcp_seq
-            if packet.tcp_flags and (packet.tcp_flags & 0x12) == 0x12:
-                flow.udps.handshake_synack = packet.time
-        else:
-            if (packet.tcp_flags and (packet.tcp_flags & 0x10) and
-                    flow.udps.handshake_synack > 0 and flow.udps.handshake_ack == 0):
-                flow.udps.handshake_ack = packet.time
-                flow.udps.synack = (flow.udps.handshake_synack - flow.udps.handshake_start) / 1000.0
-                flow.udps.ackdat = (flow.udps.handshake_ack - flow.udps.handshake_synack) / 1000.0
-                flow.udps.tcp_rtt = flow.udps.synack + flow.udps.ackdat
 
 
 def main():

@@ -10,13 +10,11 @@ from feature_extractor import FeatureExtractor
 # We import nfstream conditionally in case the system environment fails to compile C dependencies,
 # allowing the Simulator/Demo mode to run gracefully regardless.
 try:
-    from nfstream import NFStreamer, NFPlugin
+    from nfstream import NFStreamer
+    from nfplugin import SecurityPlugin
     NFSTREAM_AVAILABLE = True
 except ImportError:
     NFSTREAM_AVAILABLE = False
-    # Mock class so the file compiles if nfstream is missing
-    class NFPlugin:
-        pass
 
 # Cross-platform fallback engine (pure-Python Scapy) so PCAP analysis and
 # basic live capture also work on Windows, where NFStream cannot build.
@@ -26,53 +24,9 @@ try:
 except ImportError:
     SCAPY_AVAILABLE = False
 
-# Define Custom NFStream Plugin to extract TCP handshake metrics and TTLs
-if NFSTREAM_AVAILABLE:
-    class SecurityPlugin(NFPlugin):
-        def on_init(self, packet, flow):
-            # Capture initial TTL and Window sizes
-            flow.udps.src_ttl = packet.ip_ttl if packet.ip_version else 64
-            flow.udps.dst_ttl = 0
-            flow.udps.src_win = packet.tcp_window if packet.tcp_flags else 0
-            flow.udps.dst_win = 0
-            flow.udps.src_tcp_seq = packet.tcp_seq if packet.tcp_flags else 0
-            flow.udps.dst_tcp_seq = 0
-            flow.udps.tcp_rtt = 0.0
-            flow.udps.synack = 0.0
-            flow.udps.ackdat = 0.0
-            flow.udps.tcp_flags_sum = packet.tcp_flags if packet.tcp_flags else 0
-            
-            # Check if packet is TCP SYN
-            flow.udps.handshake_start = packet.time if packet.tcp_flags and (packet.tcp_flags & 0x02) else 0
-            flow.udps.handshake_synack = 0
-            flow.udps.handshake_ack = 0
-
-        def on_update(self, packet, flow):
-            if packet.tcp_flags:
-                flow.udps.tcp_flags_sum |= packet.tcp_flags
-            
-            # Destination to Source (Response)
-            if packet.direction == 1:
-                if flow.udps.dst_ttl == 0:
-                    flow.udps.dst_ttl = packet.ip_ttl if packet.ip_version else 64
-                if packet.tcp_flags:
-                    flow.udps.dst_win = packet.tcp_window
-                    flow.udps.dst_tcp_seq = packet.tcp_seq
-                
-                # Check for SYN-ACK
-                if packet.tcp_flags and (packet.tcp_flags & 0x12) == 0x12:
-                    flow.udps.handshake_synack = packet.time
-            # Source to Destination (Request / Completion)
-            else:
-                # Check for ACK completing handshake
-                if (packet.tcp_flags and (packet.tcp_flags & 0x10) and 
-                    flow.udps.handshake_synack > 0 and flow.udps.handshake_ack == 0):
-                    flow.udps.handshake_ack = packet.time
-                    
-                    # Convert ms timestamp differences to seconds
-                    flow.udps.synack = (flow.udps.handshake_synack - flow.udps.handshake_start) / 1000.0
-                    flow.udps.ackdat = (flow.udps.handshake_ack - flow.udps.handshake_synack) / 1000.0
-                    flow.udps.tcp_rtt = flow.udps.synack + flow.udps.ackdat
+# The SecurityPlugin (TCP handshake metrics, TTLs, windows) lives in
+# nfplugin.py and parses raw packet bytes, since NFStream's NFPacket does not
+# expose ip_ttl/tcp_window/tcp_seq attributes directly.
 
 # Page Config
 st.set_page_config(
