@@ -196,9 +196,54 @@ def severity_of(pred):
         return '🟠 MEDIUM'
     return '🟡 LOW'
 
-def build_flow_info(flow_src, pred, threshold, with_timestamp=True):
+def capture_alert_decision(flow_src, pred, threshold):
+    """Require behavioral evidence before alerting on modern captured traffic."""
+    probability = pred.get('attack_probability', 0.0)
+    if pred.get('label') != 1 or probability < max(threshold, 0.98):
+        return False, "Below production alert threshold"
+
+    f = pred['features']
+    packets = int(f.get('spkts', 0)) + int(f.get('dpkts', 0))
+    byte_count = int(f.get('sbytes', 0)) + int(f.get('dbytes', 0))
+    rate = float(f.get('rate', 0))
+    service = str(f.get('service', '-')).lower()
+    ports = {int(getattr(flow_src, 'src_port', 0)), int(getattr(flow_src, 'dst_port', 0))}
+    bidirectional = int(f.get('spkts', 0)) > 0 and int(f.get('dpkts', 0)) > 0
+
+    # QUIC did not exist in UNSW-NB15. Short UDP/443 exchanges are expected
+    # modern browser traffic and must not alert from model confidence alone.
+    if 443 in ports and getattr(flow_src, 'protocol', 0) == 17:
+        suspicious = packets >= 100 or byte_count >= 1_000_000 or rate >= 1000
+        return suspicious, ("High-volume QUIC behavior" if suspicious else
+                            "Suppressed routine short QUIC/UDP 443 flow")
+
+    if ports.intersection({80, 443}) or service in {'http', 'ssl'}:
+        suspicious = packets >= 200 or byte_count >= 2_000_000 or rate >= 2000
+        if bidirectional and not suspicious:
+            return False, "Suppressed routine bidirectional web/TLS flow"
+        repeated = max(int(f.get('ct_src_dport_ltm', 1)), int(f.get('ct_dst_ltm', 1))) >= 10
+        if not suspicious and not repeated:
+            return False, "Suppressed isolated short web/TLS flow"
+        return True, "Web traffic has burst, volume, or repeated-probing indicators"
+
+    if 53 in ports or service == 'dns':
+        if bidirectional and packets < 50 and byte_count < 100_000:
+            return False, "Suppressed routine bidirectional DNS flow"
+
+    return True, "High-confidence model alert outside encrypted-traffic guardrails"
+
+
+def build_flow_info(flow_src, pred, threshold, with_timestamp=True,
+                    alert_override=None, policy_reason=None):
     """Common display record for simulator / PCAP / live flows."""
-    is_alert = pred['label'] == 1 and pred['confidence'] >= threshold
+    is_alert = (pred['label'] == 1 and pred['confidence'] >= threshold
+                if alert_override is None else bool(alert_override))
+    was_suppressed = alert_override is False and pred['label'] == 1
+    if alert_override is None:
+        display_prediction = 'ATTACK' if is_alert else 'NORMAL'
+    else:
+        display_prediction = ('ACTIONABLE ALERT' if is_alert else
+                              'SUPPRESSED MODEL ALERT' if was_suppressed else 'NORMAL')
     info = {
         'src_ip': flow_src.src_ip,
         'src_port': flow_src.src_port,
@@ -208,12 +253,14 @@ def build_flow_info(flow_src, pred, threshold, with_timestamp=True):
         'service': pred['features']['service'],
         'duration': f"{pred['features']['dur']:.6f}s",
         'bytes': pred['features']['sbytes'] + pred['features']['dbytes'],
-        'prediction': '🚨 ATTACK' if is_alert else '🟢 NORMAL',
+        'prediction': display_prediction,
         'attack_type': pred['attack_cat'] if is_alert else '—',
         'severity': severity_of(pred) if is_alert else '—',
         'confidence': f"{pred['confidence']*100:.2f}%",
         'raw_confidence': pred['confidence'],
         'raw_label': pred['label'],
+        'actionable_alert': is_alert,
+        'policy_reason': policy_reason or 'Benchmark model threshold',
         'details': pred['features']
     }
     if with_timestamp:
@@ -297,14 +344,14 @@ def update_dashboard_metrics():
     alerts_placeholder.markdown(f"""
     <div class="metric-container">
         <div class="metric-value danger">{total_alerts}</div>
-        <div class="metric-label">Model Alerts</div>
+        <div class="metric-label">Actionable Alerts</div>
     </div>
     """, unsafe_allow_html=True)
     
     ratio_placeholder.markdown(f"""
     <div class="metric-container">
         <div class="metric-value {'danger' if ratio > 5 else 'safe'}">{ratio:.2f}%</div>
-        <div class="metric-label">Alert Ratio</div>
+        <div class="metric-label">Actionable Alert Ratio</div>
     </div>
     """, unsafe_allow_html=True)
     
@@ -476,7 +523,7 @@ if analysis_mode == "🖥️ Simulator (Demo Mode)":
                 timeline_chart = alt.Chart(chart_data).mark_line(point=True).encode(
                     x='timestamp:N',
                     y='count:Q',
-                    color=alt.Color('prediction:N', scale=alt.Scale(domain=['🚨 ATTACK', '🟢 NORMAL'], range=['#ef4444', '#10b981'])),
+                    color=alt.Color('prediction:N', scale=alt.Scale(domain=['ATTACK', 'NORMAL'], range=['#ef4444', '#10b981'])),
                     tooltip=['timestamp', 'prediction', 'count']
                 ).properties(height=250)
                 timeline_placeholder.altair_chart(timeline_chart, use_container_width=True)
@@ -556,10 +603,13 @@ elif analysis_mode == "📂 Offline PCAP Analysis":
 
             for flow in streamer:
                 pred = extractor.predict_flow(flow)
-                flow_info = build_flow_info(flow, pred, confidence_threshold, with_timestamp=False)
+                is_actionable, policy_reason = capture_alert_decision(flow, pred, confidence_threshold)
+                flow_info = build_flow_info(
+                    flow, pred, confidence_threshold, with_timestamp=False,
+                    alert_override=is_actionable, policy_reason=policy_reason)
                 flows_list.append(flow_info)
                 st.session_state.total_bytes += flow_info['bytes']
-                if pred['label'] == 1 and pred['confidence'] >= confidence_threshold:
+                if is_actionable:
                     alerts_list.append(flow_info)
             
             st.session_state.flows = flows_list
@@ -578,7 +628,9 @@ elif analysis_mode == "📂 Offline PCAP Analysis":
                     pie_data = df_pcap.groupby('prediction').size().reset_index(name='count')
                     pie_chart = alt.Chart(pie_data).mark_arc(innerRadius=50).encode(
                         theta='count:Q',
-                        color=alt.Color('prediction:N', scale=alt.Scale(domain=['🚨 ATTACK', '🟢 NORMAL'], range=['#ef4444', '#10b981'])),
+                        color=alt.Color('prediction:N', scale=alt.Scale(
+                            domain=['ACTIONABLE ALERT', 'SUPPRESSED MODEL ALERT', 'NORMAL'],
+                            range=['#ef4444', '#f59e0b', '#10b981'])),
                         tooltip=['prediction', 'count']
                     ).properties(height=250)
                     st.altair_chart(pie_chart, use_container_width=True)
@@ -625,6 +677,12 @@ elif analysis_mode == "🔌 Live Interface Capture":
         st.error("❌ Neither NFStream nor Scapy is installed. Run `pip install scapy` to enable live capture.")
         st.stop()
 
+    st.info(
+        "Live alert policy: model scores are filtered through modern-traffic guardrails. "
+        "Routine short TLS, QUIC, and bidirectional DNS flows remain visible but do not "
+        "become actionable threats without suspicious behavior."
+    )
+
     st.warning(
         "⚠️ **Permissions Notice**: Live capture requires net_raw capabilities. "
         "If you are running in a standard user space or container, this might fail "
@@ -656,7 +714,7 @@ elif analysis_mode == "🔌 Live Interface Capture":
             st.markdown("### Protocol Distribution")
             live_protocols = st.empty()
             
-        st.markdown("### 🔔 Active Intrusion Alerts")
+        st.markdown("### Actionable Alerts - Needs Review")
         live_alerts_table = st.empty()
         
         st.markdown("### 🔍 Live Flow Inspector")
@@ -689,10 +747,13 @@ elif analysis_mode == "🔌 Live Interface Capture":
             count = 0
             for flow in streamer:
                 pred = extractor.predict_flow(flow)
-                flow_info = build_flow_info(flow, pred, confidence_threshold)
+                is_actionable, policy_reason = capture_alert_decision(flow, pred, confidence_threshold)
+                flow_info = build_flow_info(
+                    flow, pred, confidence_threshold,
+                    alert_override=is_actionable, policy_reason=policy_reason)
                 st.session_state.flows.append(flow_info)
                 st.session_state.total_bytes += flow_info['bytes']
-                if pred['label'] == 1 and pred['confidence'] >= confidence_threshold:
+                if is_actionable:
                     st.session_state.alerts.append(flow_info)
                 
                 # Truncate older records to fit display memory
@@ -700,7 +761,7 @@ elif analysis_mode == "🔌 Live Interface Capture":
                     st.session_state.flows.pop(0)
                 st.session_state.alerts = [
                     item for item in st.session_state.flows
-                    if item.get('raw_label') == 1 and item.get('raw_confidence', 0) >= confidence_threshold
+                    if item.get('actionable_alert')
                 ]
                     
                 update_dashboard_metrics()
@@ -713,7 +774,9 @@ elif analysis_mode == "🔌 Live Interface Capture":
                     line_c = alt.Chart(c_data).mark_line(point=True).encode(
                         x='timestamp:N',
                         y='count:Q',
-                        color=alt.Color('prediction:N', scale=alt.Scale(domain=['🚨 ATTACK', '🟢 NORMAL'], range=['#ef4444', '#10b981'])),
+                        color=alt.Color('prediction:N', scale=alt.Scale(
+                            domain=['ACTIONABLE ALERT', 'SUPPRESSED MODEL ALERT', 'NORMAL'],
+                            range=['#ef4444', '#f59e0b', '#10b981'])),
                         tooltip=['timestamp', 'prediction', 'count']
                     ).properties(height=250)
                     live_timeline.altair_chart(line_c, use_container_width=True)
@@ -735,7 +798,7 @@ elif analysis_mode == "🔌 Live Interface Capture":
                 else:
                     live_alerts_table.info("Listening... No threats detected yet.")
 
-                df_lf = pd.DataFrame(st.session_state.flows)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'attack_type', 'confidence']]
+                df_lf = pd.DataFrame(st.session_state.flows)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'attack_type', 'confidence', 'policy_reason']]
                 live_flows_table.dataframe(df_lf.tail(12), use_container_width=True)
                 
                 count += 1

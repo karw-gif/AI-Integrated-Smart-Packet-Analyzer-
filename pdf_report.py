@@ -135,12 +135,15 @@ def generate_security_report(flows, alerts, analysis_mode="Network analysis",
     true_positives = sum(row.get("evaluation") == "TRUE POSITIVE" for row in flows)
     false_positives = sum(row.get("evaluation") == "FALSE POSITIVE" for row in flows)
     false_negatives = sum(row.get("evaluation") == "FALSE NEGATIVE" for row in flows)
+    suppressed = sum(row.get("raw_label") == 1 and not row.get("actionable_alert", False)
+                     for row in flows)
     truth_note = (
         f" Because this is benchmark simulation data, ground truth is available: "
         f"<b>{true_positives}</b> true detections, <b>{false_positives}</b> false alerts, and "
         f"<b>{false_negatives}</b> missed attacks."
         if has_ground_truth else
-        " Ground truth is not available for captured traffic, so these are unverified model alerts, not confirmed compromises."
+        f" Ground truth is not available for captured traffic, so these are unverified model alerts, not confirmed compromises. "
+        f"Modern-traffic guardrails suppressed <b>{suppressed}</b> raw model positives that lacked supporting behavioral indicators."
     )
     story.extend([metric_table, Paragraph("Executive summary", styles["Section"]), Paragraph(
         f"The system analyzed <b>{total}</b> flows and raised <b>{attack_count}</b> alerts. "
@@ -154,6 +157,10 @@ def generate_security_report(flows, alerts, analysis_mode="Network analysis",
         story.append(section)
     for section in _breakdown("Alert severity", Counter(_plain(x.get("severity", "Unknown")) for x in alerts), styles):
         story.append(section)
+    if not has_ground_truth:
+        for section in _breakdown("Capture policy outcomes", Counter(
+                _plain(x.get("policy_reason", "No policy reason")) for x in flows), styles):
+            story.append(section)
     story.append(PageBreak())
     for section in _breakdown("Top alert source hosts", Counter(_plain(x.get("src_ip", "Unknown")) for x in alerts), styles):
         story.append(section)
