@@ -119,7 +119,7 @@ def generate_security_report(flows, alerts, analysis_mode="Network analysis",
                  f"Generated {generated} | Mode: {_plain(analysis_mode)} | Alert threshold: {confidence_threshold:.0%}",
                  styles["Subtitle"]), Spacer(1, 7*mm)]
     metrics = [str(total), str(attack_count), str(total-attack_count), f"{ratio:.2f}%", _human_bytes(total_bytes)]
-    labels = ["ANALYZED FLOWS", "SECURITY ALERTS", "NORMAL FLOWS", "INTRUSION RATIO", "TOTAL TRAFFIC"]
+    labels = ["ANALYZED FLOWS", "MODEL ALERTS", "NON-ALERT FLOWS", "ALERT RATIO", "TOTAL TRAFFIC"]
     metric_table = Table([[Paragraph(v, styles["Metric"]) for v in metrics],
                           [Paragraph(v, styles["Label"]) for v in labels]],
                          colWidths=[48*mm]*5, rowHeights=[13*mm, 8*mm])
@@ -131,11 +131,22 @@ def generate_security_report(flows, alerts, analysis_mode="Network analysis",
     ]))
     high = any("HIGH" in _plain(row.get("severity")) for row in alerts)
     priority = "HIGH" if ratio >= 20 or high else "ELEVATED" if alerts else "LOW"
+    has_ground_truth = all("ground_truth" in row for row in flows)
+    true_positives = sum(row.get("evaluation") == "TRUE POSITIVE" for row in flows)
+    false_positives = sum(row.get("evaluation") == "FALSE POSITIVE" for row in flows)
+    false_negatives = sum(row.get("evaluation") == "FALSE NEGATIVE" for row in flows)
+    truth_note = (
+        f" Because this is benchmark simulation data, ground truth is available: "
+        f"<b>{true_positives}</b> true detections, <b>{false_positives}</b> false alerts, and "
+        f"<b>{false_negatives}</b> missed attacks."
+        if has_ground_truth else
+        " Ground truth is not available for captured traffic, so these are unverified model alerts, not confirmed compromises."
+    )
     story.extend([metric_table, Paragraph("Executive summary", styles["Section"]), Paragraph(
         f"The system analyzed <b>{total}</b> flows and raised <b>{attack_count}</b> alerts. "
         f"The intrusion ratio is <b>{ratio:.2f}%</b>, producing an overall review priority of "
         f"<b>{priority}</b>. Alerts should be correlated with firewall, endpoint, authentication, "
-        "and application logs before taking response actions.", styles["Body"])])
+        f"and application logs before taking response actions.{truth_note}", styles["Body"])])
 
     for section in _breakdown("Protocol distribution", Counter(_plain(x.get("protocol", "Unknown")) for x in flows), styles):
         story.append(section)
@@ -150,16 +161,16 @@ def generate_security_report(flows, alerts, analysis_mode="Network analysis",
         story.append(section)
 
     story.append(Paragraph("Detailed security alerts", styles["Section"]))
-    rows = [["Time", "Source", "Destination", "Proto", "Service", "Attack type", "Severity", "Confidence"]]
+    rows = [["Time", "Source", "Destination", "Proto", "Attack type", "Severity", "Confidence", "Finding"]]
     # Bound the appendix so large captures cannot create an impractically large PDF.
     detailed_alerts = alerts[:500]
     for row in detailed_alerts:
         rows.append([_plain(row.get("timestamp", "-")),
                      f"{_plain(row.get('src_ip'))}:{_plain(row.get('src_port'))}",
                      f"{_plain(row.get('dst_ip'))}:{_plain(row.get('dst_port'))}",
-                     _plain(row.get("protocol")), _plain(row.get("service")),
-                     _plain(row.get("attack_type")), _plain(row.get("severity")),
-                     _plain(row.get("confidence"))])
+                     _plain(row.get("protocol")), _plain(row.get("attack_type")),
+                     _plain(row.get("severity")), _plain(row.get("confidence")),
+                     _plain(row.get("evaluation", "UNVERIFIED MODEL ALERT"))])
     if len(rows) == 1:
         rows.append(["-", "-", "-", "-", "-", "No alerts detected", "-", "-"])
     story.append(_style_table(Table(rows, colWidths=[20*mm, 42*mm, 42*mm, 18*mm, 25*mm,

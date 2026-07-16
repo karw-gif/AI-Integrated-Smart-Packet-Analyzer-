@@ -157,10 +157,10 @@ analysis_mode = st.sidebar.selectbox(
 
 # Confidence Threshold Slider
 confidence_threshold = st.sidebar.slider(
-    "Alert Confidence Threshold",
+    "Model Alert Threshold",
     min_value=0.50,
     max_value=0.99,
-    value=0.75,
+    value=0.90,
     step=0.01,
     help="Minimum probability required to flag a flow as malicious."
 )
@@ -297,14 +297,14 @@ def update_dashboard_metrics():
     alerts_placeholder.markdown(f"""
     <div class="metric-container">
         <div class="metric-value danger">{total_alerts}</div>
-        <div class="metric-label">Security Alerts</div>
+        <div class="metric-label">Model Alerts</div>
     </div>
     """, unsafe_allow_html=True)
     
     ratio_placeholder.markdown(f"""
     <div class="metric-container">
         <div class="metric-value {'danger' if ratio > 5 else 'safe'}">{ratio:.2f}%</div>
-        <div class="metric-label">Intrusion Ratio</div>
+        <div class="metric-label">Alert Ratio</div>
     </div>
     """, unsafe_allow_html=True)
     
@@ -321,7 +321,8 @@ if analysis_mode == "🖥️ Simulator (Demo Mode)":
     st.write(
         "Simulator mode streams real network traffic samples from the UNSW-NB15 "
         "test set and feeds them through our feature mapping and XGBoost model. "
-        "Use this mode to see the dashboard in action."
+        "Use this mode to see the dashboard in action. Simulator IP addresses are synthetic; "
+        "the Ground Truth and Evaluation columns show whether each model alert is correct."
     )
     
     col_c1, col_c2 = st.columns([1, 4])
@@ -330,6 +331,12 @@ if analysis_mode == "🖥️ Simulator (Demo Mode)":
         stop_sim = st.button("⏹️ Stop", use_container_width=True)
         clear_sim = st.button("🗑️ Clear Dashboard", on_click=clear_session_data, use_container_width=True)
         sim_speed = st.slider("Simulation Delay (s)", 0.1, 2.0, 0.5)
+        traffic_profile = st.selectbox(
+            "Simulation traffic mix",
+            ["Realistic network (95% benign)", "Balanced demonstration (50% benign)",
+             "Original benchmark distribution"],
+            help="UNSW-NB15 is attack-heavy. The realistic profile provides a more representative demo.",
+        )
         
     with col_c2:
         # Load sample data
@@ -356,7 +363,17 @@ if analysis_mode == "🖥️ Simulator (Demo Mode)":
         
         # We simulate the structure of an NFStream flow using dictionary entries
         # because the FeatureExtractor expects base fields and will calculate sliding count fields itself.
-        sim_records = sim_df.to_dict('records')
+        if traffic_profile != "Original benchmark distribution":
+            benign_share = 0.95 if traffic_profile.startswith("Realistic") else 0.50
+            sample_size = min(5000, len(sim_df))
+            benign_n = int(sample_size * benign_share)
+            attack_n = sample_size - benign_n
+            benign = sim_df[sim_df['label'] == 0].sample(n=benign_n, random_state=17, replace=False)
+            attacks = sim_df[sim_df['label'] == 1].sample(n=attack_n, random_state=23, replace=False)
+            active_sim_df = pd.concat([benign, attacks]).sample(frac=1.0, random_state=29)
+        else:
+            active_sim_df = sim_df
+        sim_records = active_sim_df.to_dict('records')
         
         # Define mock flow class inside loop
         class SimulatorFlow:
@@ -423,6 +440,17 @@ if analysis_mode == "🖥️ Simulator (Demo Mode)":
             # Predict
             pred = extractor.predict_flow(mock_flow)
             flow_info = build_flow_info(mock_flow, pred, confidence_threshold)
+            truth_is_attack = int(record.get('label', 0)) == 1
+            model_alert = pred['label'] == 1 and pred['confidence'] >= confidence_threshold
+            flow_info['ground_truth'] = 'ATTACK' if truth_is_attack else 'NORMAL'
+            flow_info['ground_truth_attack_type'] = (
+                str(record.get('attack_cat', 'Unknown')) if truth_is_attack else '-'
+            )
+            flow_info['evaluation'] = (
+                'TRUE POSITIVE' if model_alert and truth_is_attack else
+                'FALSE POSITIVE' if model_alert else
+                'FALSE NEGATIVE' if truth_is_attack else 'TRUE NEGATIVE'
+            )
             
             st.session_state.flows.append(flow_info)
             st.session_state.total_bytes += flow_info['bytes']
@@ -433,6 +461,11 @@ if analysis_mode == "🖥️ Simulator (Demo Mode)":
             # Keep lists trimmed for dashboard performance
             if len(st.session_state.flows) > 500:
                 st.session_state.flows.pop(0)
+            # Alerts must describe the same visible 500-flow window as the metrics.
+            st.session_state.alerts = [
+                item for item in st.session_state.flows
+                if item.get('raw_label') == 1 and item.get('raw_confidence', 0) >= confidence_threshold
+            ]
             
             update_dashboard_metrics()
             
@@ -460,13 +493,13 @@ if analysis_mode == "🖥️ Simulator (Demo Mode)":
             
             # Update Alerts Table
             if st.session_state.alerts:
-                df_alerts = pd.DataFrame(st.session_state.alerts)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'attack_type', 'severity', 'confidence']]
+                df_alerts = pd.DataFrame(st.session_state.alerts)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'attack_type', 'severity', 'confidence', 'ground_truth', 'evaluation']]
                 alerts_table_placeholder.dataframe(df_alerts.tail(10), use_container_width=True)
             else:
                 alerts_table_placeholder.info("No security alerts triggered.")
                 
             # Update Flows Table
-            df_display = df_flows[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'attack_type', 'confidence']]
+            df_display = df_flows[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'attack_type', 'confidence', 'ground_truth', 'evaluation']]
             flows_table_placeholder.dataframe(df_display.tail(15), use_container_width=True)
             
             idx += 1
@@ -665,6 +698,10 @@ elif analysis_mode == "🔌 Live Interface Capture":
                 # Truncate older records to fit display memory
                 if len(st.session_state.flows) > 300:
                     st.session_state.flows.pop(0)
+                st.session_state.alerts = [
+                    item for item in st.session_state.flows
+                    if item.get('raw_label') == 1 and item.get('raw_confidence', 0) >= confidence_threshold
+                ]
                     
                 update_dashboard_metrics()
                 
