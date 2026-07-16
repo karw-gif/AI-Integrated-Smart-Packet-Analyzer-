@@ -31,7 +31,7 @@ except ImportError:
 
 # Page Config
 st.set_page_config(
-    page_title="CyberNetwork Intrusion Detection System",
+    page_title="AI Integrated Smart Packet Analyzer",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -133,7 +133,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1 class='cyber-title'>🛡️ CYBER-NETWORK INTRUSION DETECTION SYSTEM</h1>", unsafe_allow_html=True)
+st.markdown("<h1 class='cyber-title'>🛡️ AI INTEGRATED SMART PACKET ANALYZER</h1>", unsafe_allow_html=True)
 
 # Cache model loading
 @st.cache_resource
@@ -540,13 +540,13 @@ if analysis_mode == "🖥️ Simulator (Demo Mode)":
             
             # Update Alerts Table
             if st.session_state.alerts:
-                df_alerts = pd.DataFrame(st.session_state.alerts)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'attack_type', 'severity', 'confidence', 'ground_truth', 'evaluation']]
+                df_alerts = pd.DataFrame(st.session_state.alerts).reindex(columns=['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'attack_type', 'severity', 'confidence', 'ground_truth', 'evaluation'], fill_value='-')
                 alerts_table_placeholder.dataframe(df_alerts.tail(10), use_container_width=True)
             else:
                 alerts_table_placeholder.info("No security alerts triggered.")
                 
             # Update Flows Table
-            df_display = df_flows[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'attack_type', 'confidence', 'ground_truth', 'evaluation']]
+            df_display = df_flows.reindex(columns=['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'attack_type', 'confidence', 'ground_truth', 'evaluation'], fill_value='-')
             flows_table_placeholder.dataframe(df_display.tail(15), use_container_width=True)
             
             idx += 1
@@ -793,12 +793,12 @@ elif analysis_mode == "🔌 Live Interface Capture":
                 
                 # Live Tables
                 if st.session_state.alerts:
-                    df_la = pd.DataFrame(st.session_state.alerts)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'attack_type', 'severity', 'confidence']]
+                    df_la = pd.DataFrame(st.session_state.alerts).reindex(columns=['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'attack_type', 'severity', 'confidence'], fill_value='-')
                     live_alerts_table.dataframe(df_la.tail(8), use_container_width=True)
                 else:
                     live_alerts_table.info("Listening... No threats detected yet.")
 
-                df_lf = pd.DataFrame(st.session_state.flows)[['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'attack_type', 'confidence', 'policy_reason']]
+                df_lf = pd.DataFrame(st.session_state.flows).reindex(columns=['timestamp', 'src_ip', 'src_port', 'dst_ip', 'dst_port', 'protocol', 'service', 'bytes', 'prediction', 'attack_type', 'confidence', 'policy_reason'], fill_value='-')
                 live_flows_table.dataframe(df_lf.tail(12), use_container_width=True)
                 
                 count += 1

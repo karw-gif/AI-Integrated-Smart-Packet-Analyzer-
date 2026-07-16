@@ -1,4 +1,4 @@
-# 🛡️ CyberNetwork Intrusion Detection System (NIDS)
+# 🛡️ AI Integrated Smart Packet Analyzer (NIDS)
 
 **A real-time, machine-learning-powered Network Intrusion Detection System** that watches network traffic, decides in milliseconds whether each connection is normal or an attack, names the *type* of attack, explains *why* it made that decision — and shows it all on a live dashboard.
 

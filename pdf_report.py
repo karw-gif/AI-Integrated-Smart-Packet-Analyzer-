@@ -68,7 +68,7 @@ def _footer(canvas, doc):
     canvas.line(doc.leftMargin, 13*mm, width-doc.rightMargin, 13*mm)
     canvas.setFont("Helvetica", 8)
     canvas.setFillColor(SLATE)
-    canvas.drawString(doc.leftMargin, 8*mm, "CyberNetwork Intrusion Detection System")
+    canvas.drawString(doc.leftMargin, 8*mm, "AI Integrated Smart Packet Analyzer")
     canvas.drawRightString(width-doc.rightMargin, 8*mm, f"Page {doc.page}")
     canvas.restoreState()
 
@@ -94,7 +94,7 @@ def generate_security_report(flows, alerts, analysis_mode="Network analysis",
     doc = SimpleDocTemplate(output, pagesize=landscape(A4), leftMargin=16*mm,
                             rightMargin=16*mm, topMargin=16*mm, bottomMargin=19*mm,
                             title="Network Intrusion Detection Security Report",
-                            author="CyberNetwork Intrusion Detection System")
+                            author="AI Integrated Smart Packet Analyzer")
     base = getSampleStyleSheet()
     styles = {
         "Title": ParagraphStyle("ReportTitle", parent=base["Title"], fontName="Helvetica-Bold",
