@@ -6,6 +6,7 @@ joblib
 streamlit
 altair
 scapy
+reportlab
 # Optional — preferred capture engine with DPI, Linux/macOS only
 # (the app falls back to the Scapy engine automatically when missing):
 # nfstream

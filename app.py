@@ -6,6 +6,7 @@ import os
 import tempfile
 import altair as alt
 from feature_extractor import FeatureExtractor
+from pdf_report import generate_security_report
 
 # We import nfstream conditionally in case the system environment fails to compile C dependencies,
 # allowing the Simulator/Demo mode to run gracefully regardless.
@@ -220,10 +221,17 @@ def build_flow_info(flow_src, pred, threshold, with_timestamp=True):
     return info
 
 def export_buttons(key_prefix):
-    """CSV download buttons for the current flows and alerts."""
+    """CSV exports and a complete downloadable PDF security report."""
     if not st.session_state.flows:
         return
-    exp_col1, exp_col2 = st.columns(2)
+    st.markdown("### Security Reports")
+    anonymize = st.checkbox(
+        "Anonymize IP addresses in PDF",
+        value=False,
+        key=f"{key_prefix}_anonymize_pdf",
+        help="Replaces source and destination IPs with stable anonymous host IDs.",
+    )
+    exp_col1, exp_col2, exp_col3 = st.columns(3)
     df_all = pd.DataFrame(st.session_state.flows).drop(columns=['details'], errors='ignore')
     with exp_col1:
         st.download_button("⬇️ Export Flow Report (CSV)", df_all.to_csv(index=False),
@@ -235,6 +243,22 @@ def export_buttons(key_prefix):
             st.download_button("⬇️ Export Alerts Report (CSV)", df_al.to_csv(index=False),
                                file_name="nids_alerts_report.csv", mime="text/csv",
                                key=f"{key_prefix}_alerts", use_container_width=True)
+    pdf_bytes = generate_security_report(
+        st.session_state.flows,
+        st.session_state.alerts,
+        analysis_mode=analysis_mode,
+        confidence_threshold=confidence_threshold,
+        anonymize_ips=anonymize,
+    )
+    with exp_col3:
+        st.download_button(
+            "Download Security Report (PDF)",
+            data=pdf_bytes,
+            file_name=f"nids_security_report_{time.strftime('%Y%m%d_%H%M%S')}.pdf",
+            mime="application/pdf",
+            key=f"{key_prefix}_pdf",
+            use_container_width=True,
+        )
 
 # Dashboard Layout Elements
 m_col1, m_col2, m_col3, m_col4 = st.columns(4)
@@ -685,6 +709,9 @@ elif analysis_mode == "🔌 Live Interface Capture":
         except Exception as e:
             st.error(f"Error during live capture: {e}")
             st.info("Check interface name or permissions. Make sure to run Streamlit with sufficient capture privileges.")
+
+    # Keep exports available after capture completes and across Streamlit reruns.
+    export_buttons("live")
 
 elif analysis_mode == "📊 Model Performance Report":
     st.subheader("📊 Model Evaluation on Held-Out UNSW-NB15 Test Data")

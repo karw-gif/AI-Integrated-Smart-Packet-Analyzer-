@@ -24,6 +24,9 @@ jobs:
       - name: CLI prediction pipeline (mock flows)
         run: python test_pipeline.py
 
+      - name: PDF security report generation
+        run: python test_pdf_report.py
+
       - name: Generate synthetic test capture
         run: python make_test_pcap.py
 
