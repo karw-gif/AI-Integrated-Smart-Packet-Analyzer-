@@ -142,11 +142,11 @@ st.markdown("<h1 class='cyber-title'>🛡️ AI INTEGRATED SMART PACKET ANALYZER
 
 # Cache model loading
 @st.cache_resource
-def load_feature_extractor():
+def load_feature_extractor(artifact_version):
     return FeatureExtractor()
 
 try:
-    extractor = load_feature_extractor()
+    extractor = load_feature_extractor(os.path.getmtime('deployment_threshold.pkl'))
     st.sidebar.success("✅ XGBoost Intrusion Model Loaded")
 except Exception as e:
     st.sidebar.error(f"❌ Error loading model: {e}")
@@ -164,12 +164,13 @@ analysis_mode = st.sidebar.selectbox(
 confidence_threshold = st.sidebar.slider(
     "Model Alert Threshold",
     min_value=0.50,
-    max_value=0.99,
-    value=0.95,
-    step=0.01,
+    max_value=0.9999,
+    value=extractor.recommended_threshold,
+    step=0.0001,
+    format="%.4f",
     help="Minimum probability required to flag a flow as malicious. Higher "
-         "values reduce false positives at some cost to detection rate; 0.95 is "
-         "a balanced default, raise toward 0.99 for a low-noise demo."
+         "values reduce false positives at some cost to detection rate. The default "
+         "is measured from held-out benign traffic to target a 0.1% false-positive rate."
 )
 
 st.sidebar.markdown("---")
@@ -755,12 +756,6 @@ elif analysis_mode == "🔌 Live Interface Capture":
         "become actionable threats without suspicious behavior."
     )
 
-    st.warning(
-        "⚠️ **Permissions Notice**: Live capture requires net_raw capabilities. "
-        "If you are running in a standard user space or container, this might fail "
-        "unless the application has appropriate permissions (e.g., sudo / Npcap)."
-    )
-    
     if_col1, if_col2 = st.columns([2, 1])
     with if_col1:
         interface_name = st.text_input("Enter Network Interface name", value="lo")
@@ -1052,8 +1047,9 @@ elif analysis_mode == "🚨 Response Center":
 elif analysis_mode == "📊 Model Performance Report":
     st.subheader("📊 Model Evaluation on Held-Out UNSW-NB15 Test Data")
     st.write(
-        "These metrics were computed on **82,332 flows the model never saw during training**, "
-        "so they reflect true generalization performance rather than memorization."
+        "The official unseen split is divided between threshold calibration and final "
+        "evaluation, so the reported deployment metrics are not measured on rows used "
+        "to choose the operating point."
     )
 
     import joblib as _joblib
@@ -1063,7 +1059,12 @@ elif analysis_mode == "📊 Model Performance Report":
         st.error(f"model_metrics.pkl not found — run `py train_model.py` first. ({e})")
         st.stop()
 
-    b = mm['binary']
+    b = mm.get('deployment', mm['binary'])
+    st.caption(
+        f"Low-noise operating point: {b.get('threshold', 0.5):.4f} threshold, "
+        f"{b.get('false_positive_rate', 0.0)*100:.2f}% false-positive rate on "
+        f"{mm.get('n_deployment_test', mm.get('n_test', 0)):,} final evaluation flows."
+    )
     p_col1, p_col2, p_col3, p_col4 = st.columns(4)
     for col, (label, val) in zip(
         [p_col1, p_col2, p_col3, p_col4],
@@ -1098,8 +1099,10 @@ elif analysis_mode == "📊 Model Performance Report":
             x='Predicted:N', y='Actual:N', text='count:Q'
         )
         st.altair_chart(cm_chart + cm_text, use_container_width=True)
-        st.caption(f"Attack detection rate: {b['recall']*100:.1f}% — only "
-                   f"{cm[1][0]:,} of {cm[1][0]+cm[1][1]:,} attacks slipped through.")
+        st.caption(
+            f"Attack detection rate: {b['recall']*100:.1f}%. "
+            f"False-positive rate: {b.get('false_positive_rate', 0.0)*100:.2f}%."
+        )
 
     with perf_c2:
         st.markdown("### Top 15 Most Influential Features")
@@ -1122,7 +1125,7 @@ elif analysis_mode == "📊 Model Performance Report":
                 for k, v in rep.items() if isinstance(v, dict) and k not in ('macro avg', 'weighted avg')]
     st.dataframe(pd.DataFrame(rep_rows), use_container_width=True, hide_index=True)
 
-    with st.expander("🔬 Why we deliberately dropped 7 dataset-artifact features"):
+    with st.expander("🔬 Why we deliberately dropped dataset-artifact features"):
         st.write(
             "UNSW-NB15 was generated in a lab where attack traffic used fixed TTL values and "
             "constant TCP window sizes. Features like `sttl`, `dttl`, `ct_state_ttl`, `swin`, "

@@ -93,13 +93,17 @@ class FeatureExtractor:
                  encoders_path='label_encoders.pkl',
                  columns_path='feature_columns.pkl',
                  attack_model_path='xgboost_attack_model.json',
-                 attack_classes_path='attack_classes.pkl'):
+                 attack_classes_path='attack_classes.pkl',
+                 threshold_path='deployment_threshold.pkl'):
 
         from xgboost import XGBClassifier
         self.model = XGBClassifier()
         self.model.load_model(model_path)
         self.label_encoders = joblib.load(encoders_path)
         self.expected_features = joblib.load(columns_path)
+        self.recommended_threshold = (
+            float(joblib.load(threshold_path)) if os.path.exists(threshold_path) else 0.99
+        )
         self.memory = FlowMemory(window_size=100)
 
         # Multi-class attack categorizer (optional)

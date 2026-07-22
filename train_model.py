@@ -8,6 +8,7 @@ Produces:
   - label_encoders.pkl           (categorical encoders, regenerated)
   - feature_columns.pkl          (exact feature order fed to the models)
   - attack_classes.pkl           (attack category names for the multi-class model)
+  - deployment_threshold.pkl     (low-noise threshold calibrated on benign flows)
   - model_metrics.pkl            (held-out evaluation metrics for the dashboard)
 
 Run:  py train_model.py
@@ -17,6 +18,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import (accuracy_score, precision_score, recall_score,
                              f1_score, roc_auc_score, confusion_matrix,
                              classification_report)
@@ -41,6 +43,7 @@ DROP_COLS = ['id', 'attack_cat', 'label']
 # (20-100ms RTT) would all look "attack-like".
 ARTIFACT_FEATURES = ['sttl', 'dttl', 'ct_state_ttl', 'swin', 'dwin', 'stcpb', 'dtcpb',
                      'tcprtt', 'synack', 'ackdat']
+TARGET_FALSE_POSITIVE_RATE = 0.001
 
 
 def load_data():
@@ -62,17 +65,29 @@ def encode(train, test):
     return encoders
 
 
-def eval_binary(model, X, y):
+def eval_binary(model, X, y, threshold=0.5):
     prob = model.predict_proba(X)[:, 1]
-    pred = (prob >= 0.5).astype(int)
+    pred = (prob >= threshold).astype(int)
+    cm = confusion_matrix(y, pred)
     return {
+        'threshold': threshold,
         'accuracy': accuracy_score(y, pred),
         'precision': precision_score(y, pred),
         'recall': recall_score(y, pred),
         'f1': f1_score(y, pred),
         'roc_auc': roc_auc_score(y, prob),
-        'confusion_matrix': confusion_matrix(y, pred).tolist(),
+        'false_positive_rate': cm[0, 1] / cm[0].sum(),
+        'confusion_matrix': cm.tolist(),
     }
+
+
+def low_noise_threshold(model, X, y):
+    """Choose an operating point from benign held-out traffic."""
+    prob = model.predict_proba(X)[:, 1]
+    benign_prob = prob[np.asarray(y) == 0]
+    return float(np.quantile(
+        benign_prob, 1.0 - TARGET_FALSE_POSITIVE_RATE, method='higher'
+    ))
 
 
 def main():
@@ -102,6 +117,20 @@ def main():
     # dramatically better behavior on live traffic. Keep both scores for the report.
     model, features, metrics = results['robust-features']
     metrics_all = results['all-42-features'][2]
+    calibration, deployment_test = train_test_split(
+        test, test_size=0.5, random_state=42, stratify=test['label']
+    )
+    deployment_threshold = low_noise_threshold(
+        model, calibration[features], calibration['label']
+    )
+    deployment_metrics = eval_binary(
+        model, deployment_test[features], deployment_test['label'], deployment_threshold
+    )
+    print(f'\n[low-noise deployment threshold: {deployment_threshold:.6f}]')
+    print(f"  precision: {deployment_metrics['precision']:.4f}")
+    print(f"  recall: {deployment_metrics['recall']:.4f}")
+    print(f"  false_positive_rate: {deployment_metrics['false_positive_rate']:.4f}")
+    print(f"  confusion_matrix: {deployment_metrics['confusion_matrix']}")
 
     print('\nTraining multi-class attack-category model (robust features)...')
     cat_le = LabelEncoder()
@@ -127,8 +156,13 @@ def main():
     joblib.dump(encoders, 'label_encoders.pkl')
     joblib.dump(features, 'feature_columns.pkl')
     joblib.dump(list(cat_le.classes_), 'attack_classes.pkl')
+    joblib.dump(deployment_threshold, 'deployment_threshold.pkl')
     joblib.dump({
         'binary': metrics,
+        'deployment': deployment_metrics,
+        'deployment_target_false_positive_rate': TARGET_FALSE_POSITIVE_RATE,
+        'n_threshold_calibration': len(calibration),
+        'n_deployment_test': len(deployment_test),
         'binary_all_features': metrics_all,
         'attack_cat_accuracy': cat_acc,
         'attack_cat_report': cat_report,

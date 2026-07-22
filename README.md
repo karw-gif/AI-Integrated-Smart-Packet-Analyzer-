@@ -82,16 +82,18 @@ UNSW-NB15 was generated in a lab, and some features secretly encode *the lab set
 - **TTL values & TCP window sizes** — fixed per traffic generator, near-perfect class separators *in the lab*, meaningless in the real world.
 - **TCP handshake latency** (`tcprtt`, `synack`, `ackdat`) — normal traffic ran on a ~0.1 ms LAN, attacks came through ~60 ms paths. Any real internet connection (20–100 ms) therefore "looked like an attack".
 
-Result before the fix: a clean DNS lookup was flagged as an attack with **99.96% confidence**. We identified all 10 artifact features **using our own explainability tool**, retrained without them, and the false positives disappeared — at a cost of only **0.2 percentage points** of benchmark accuracy. *Robustness over leaderboard scores.*
+Result before the fix: a clean DNS lookup was flagged as an attack with **99.96% confidence**. We identified all 10 artifact features **using our own explainability tool** and retrained without them at a cost of only **0.2 percentage points** of benchmark accuracy. A second low-noise threshold calibration now limits held-out benign alerts to approximately **0.1%**. *Robustness over leaderboard scores.*
 
 ### Final scorecard (held-out test data)
 
 | Metric | Value |
 |---|---|
-| Accuracy | **86.6%** |
-| Attack detection rate (recall) | **97.5%** |
+| Benchmark accuracy (0.5 cutoff) | **86.6%** |
+| Benchmark attack recall (0.5 cutoff) | **97.5%** |
 | ROC-AUC | **0.980** |
-| Missed attacks | only 1,121 of 45,332 (2.5%) |
+| Low-noise threshold | **0.9985** |
+| Low-noise false-positive rate | **0.05%** |
+| Low-noise precision / recall | **99.94% / 68.89%** |
 | Attack-category accuracy (10 classes) | **75.4%** |
 
 ### Verified on real infrastructure
@@ -99,7 +101,7 @@ Result before the fix: a clean DNS lookup was flagged as an attack with **99.96%
 - **Automated CI**: every push to `main` triggers a GitHub Actions workflow on Ubuntu that reruns the full pipeline with **both** capture engines and fails the build if detection quality drops.
 
 ### Known limitation (and why stating it matters)
-The dataset is from 2015; modern browsing is dominated by QUIC/HTTP3 (encrypted UDP), which didn't exist then — so short QUIC fragments can be over-flagged on live traffic. Mitigation: raise the confidence threshold slider (≥0.95) for live monitoring. Every IDS trained on this dataset shares this limit; *knowing precisely where your model breaks is part of the engineering.*
+The dataset is from 2015; modern browsing is dominated by QUIC/HTTP3 (encrypted UDP), which did not exist then, so short QUIC fragments can be over-flagged on live traffic. The app defaults to a threshold measured from held-out benign traffic and also applies live-traffic guardrails. The stricter operating point reduces false positives at the expected cost of lower recall. *Knowing precisely where your model breaks is part of the engineering.*
 
 ---
 
@@ -169,6 +171,7 @@ python linux_nfstream_test.py    # (Linux) full NFStream integration test
 | `Dockerfile` | One-command Linux deployment |
 | `xgboost_network_model.json` | Binary attack/normal classifier (version-independent format) |
 | `xgboost_attack_model.json` | 10-class attack categorizer |
+| `deployment_threshold.pkl` | Held-out low-noise alert threshold used by the dashboard |
 | `model_metrics.pkl` | Held-out evaluation metrics shown in the dashboard |
 | `data/` | UNSW-NB15 splits + `test_traffic.pcap` demo capture |
 | `UPGRADES.md` | Full engineering changelog: every bug found, fix applied, and feature added |
