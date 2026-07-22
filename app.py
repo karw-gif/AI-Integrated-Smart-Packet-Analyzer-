@@ -7,6 +7,7 @@ import tempfile
 import altair as alt
 from feature_extractor import FeatureExtractor
 from pdf_report import generate_security_report
+import response_engine as response
 
 # We import nfstream conditionally in case the system environment fails to compile C dependencies,
 # allowing the Simulator/Demo mode to run gracefully regardless.
@@ -73,6 +74,10 @@ st.markdown("""
     }
     .metric-value.info {
         color: #3b82f6;
+    }
+    .metric-value.warn {
+        color: #f59e0b;
+        text-shadow: 0 0 8px rgba(245, 158, 11, 0.5);
     }
     .metric-label {
         font-size: 0.9rem;
@@ -152,7 +157,7 @@ st.sidebar.title("Configuration Panel")
 analysis_mode = st.sidebar.selectbox(
     "Choose Analysis Mode",
     ["🖥️ Simulator (Demo Mode)", "📂 Offline PCAP Analysis", "🔌 Live Interface Capture",
-     "📊 Model Performance Report"]
+     "🚨 Response Center", "📊 Model Performance Report"]
 )
 
 # Confidence Threshold Slider
@@ -160,9 +165,40 @@ confidence_threshold = st.sidebar.slider(
     "Model Alert Threshold",
     min_value=0.50,
     max_value=0.99,
-    value=0.90,
+    value=0.95,
     step=0.01,
-    help="Minimum probability required to flag a flow as malicious."
+    help="Minimum probability required to flag a flow as malicious. Higher "
+         "values reduce false positives at some cost to detection rate; 0.95 is "
+         "a balanced default, raise toward 0.99 for a low-noise demo."
+)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🛡️ Response & Mitigation")
+_fw_backend = response.firewall_backend()
+enforce_os_firewall = st.sidebar.checkbox(
+    "Enforce blocks at OS firewall",
+    value=False,
+    help=("When ON, blocking an IP also writes a real firewall rule "
+          f"({_fw_backend if _fw_backend != 'none' else 'no supported tool detected'}). "
+          "When OFF, blocks are logical only (recorded in the app, no OS change). "
+          "Leave OFF unless you intend to drop traffic on this host — a false "
+          "positive would cut off a legitimate IP."),
+)
+if enforce_os_firewall:
+    if _fw_backend == "none":
+        st.sidebar.error(
+            "No netsh/iptables detected — enforcement will fall back to logical only."
+        )
+    else:
+        st.sidebar.warning(
+            f"⚠️ Real **{_fw_backend}** firewall rules will be written. "
+            "This requires Administrator/root privileges."
+        )
+auto_block_high = st.sidebar.checkbox(
+    "Auto-quarantine HIGH-severity alerts",
+    value=False,
+    help="During live/PCAP analysis, automatically quarantine (flag, do not "
+         "drop) the source IP of any HIGH-severity actionable alert.",
 )
 
 st.sidebar.markdown("---")
@@ -234,12 +270,19 @@ def capture_alert_decision(flow_src, pred, threshold):
 
 
 def build_flow_info(flow_src, pred, threshold, with_timestamp=True,
-                    alert_override=None, policy_reason=None):
-    """Common display record for simulator / PCAP / live flows."""
+                    alert_override=None, policy_reason=None, binary_labels=False):
+    """Common display record for simulator / PCAP / live flows.
+
+    ``binary_labels`` collapses the verdict to just 'Malicious' / 'Normal'
+    (used by Live Capture) — flows that the guardrails hold back are simply
+    reported as Normal rather than getting a separate 'Suppressed' category.
+    """
     is_alert = (pred['label'] == 1 and pred['confidence'] >= threshold
                 if alert_override is None else bool(alert_override))
     was_suppressed = alert_override is False and pred['label'] == 1
-    if alert_override is None:
+    if binary_labels:
+        display_prediction = 'Malicious' if is_alert else 'Normal'
+    elif alert_override is None:
         display_prediction = 'ATTACK' if is_alert else 'NORMAL'
     else:
         display_prediction = ('ACTIONABLE ALERT' if is_alert else
@@ -266,6 +309,27 @@ def build_flow_info(flow_src, pred, threshold, with_timestamp=True,
     if with_timestamp:
         info = {'timestamp': time.strftime("%H:%M:%S"), **info}
     return info
+
+
+def persist_and_mitigate(alerts):
+    """Write actionable alerts to the durable log and optionally auto-mitigate.
+
+    Called once per analysis run with the list of actionable alert records.
+    Auto-quarantine (never auto-block) is applied to HIGH-severity alerts when
+    the sidebar toggle is on, so a false positive never silently drops traffic.
+    """
+    if not alerts:
+        return
+    response.record_alerts(alerts)
+    if not auto_block_high:
+        return
+    for a in alerts:
+        if 'HIGH' in str(a.get('severity', '')) and response.is_valid_ip(a.get('src_ip', '')):
+            response.quarantine_ip(
+                a['src_ip'],
+                reason=f"Auto-quarantine: {a.get('policy_reason', 'HIGH severity alert')}",
+                attack_type=a.get('attack_type', ''),
+            )
 
 def export_buttons(key_prefix):
     """CSV exports and a complete downloadable PDF security report."""
@@ -484,8 +548,12 @@ if analysis_mode == "🖥️ Simulator (Demo Mode)":
             record = sim_records[idx]
             mock_flow = SimulatorFlow(record)
             
-            # Predict
-            pred = extractor.predict_flow(mock_flow)
+            # Predict directly from the dataset's real features. The simulator
+            # assigns synthetic IPs, so routing this through predict_flow would
+            # recompute the ct_* window counts from meaningless data — the cause
+            # of the simulator's inflated false positives. predict_precomputed
+            # uses the row's genuine UNSW-NB15 features instead.
+            pred = extractor.predict_precomputed(record)
             flow_info = build_flow_info(mock_flow, pred, confidence_threshold)
             truth_is_attack = int(record.get('label', 0)) == 1
             model_alert = pred['label'] == 1 and pred['confidence'] >= confidence_threshold
@@ -614,9 +682,13 @@ elif analysis_mode == "📂 Offline PCAP Analysis":
             
             st.session_state.flows = flows_list
             st.session_state.alerts = alerts_list
+            persist_and_mitigate(alerts_list)
             update_dashboard_metrics()
-            
+
             st.success(f"Successfully audited {len(flows_list)} network flows from PCAP.")
+            if alerts_list:
+                st.info(f"🚨 {len(alerts_list)} actionable alert(s) written to the alert log "
+                        "— review and act on them in the **Response Center**.")
             
             # Display Results
             col_chart1, col_chart2 = st.columns(2)
@@ -750,7 +822,8 @@ elif analysis_mode == "🔌 Live Interface Capture":
                 is_actionable, policy_reason = capture_alert_decision(flow, pred, confidence_threshold)
                 flow_info = build_flow_info(
                     flow, pred, confidence_threshold,
-                    alert_override=is_actionable, policy_reason=policy_reason)
+                    alert_override=is_actionable, policy_reason=policy_reason,
+                    binary_labels=True)
                 st.session_state.flows.append(flow_info)
                 st.session_state.total_bytes += flow_info['bytes']
                 if is_actionable:
@@ -775,8 +848,8 @@ elif analysis_mode == "🔌 Live Interface Capture":
                         x='timestamp:N',
                         y='count:Q',
                         color=alt.Color('prediction:N', scale=alt.Scale(
-                            domain=['ACTIONABLE ALERT', 'SUPPRESSED MODEL ALERT', 'NORMAL'],
-                            range=['#ef4444', '#f59e0b', '#10b981'])),
+                            domain=['Malicious', 'Normal'],
+                            range=['#ef4444', '#10b981'])),
                         tooltip=['timestamp', 'prediction', 'count']
                     ).properties(height=250)
                     live_timeline.altair_chart(line_c, use_container_width=True)
@@ -806,12 +879,175 @@ elif analysis_mode == "🔌 Live Interface Capture":
                     st.success("Reached flow capture limit.")
                     break
                     
+            persist_and_mitigate(st.session_state.alerts)
+            if st.session_state.alerts:
+                st.info(f"🚨 {len(st.session_state.alerts)} actionable alert(s) written to the "
+                        "alert log — review and act on them in the **Response Center**.")
+
         except Exception as e:
             st.error(f"Error during live capture: {e}")
             st.info("Check interface name or permissions. Make sure to run Streamlit with sufficient capture privileges.")
 
     # Keep exports available after capture completes and across Streamlit reruns.
     export_buttons("live")
+
+elif analysis_mode == "🚨 Response Center":
+    st.subheader("🚨 Response Center — Alerts, Blocking & Quarantine")
+    st.write(
+        "This is the mitigation layer. Actionable alerts from the Simulator, PCAP "
+        "audits, and Live captures are logged here durably. From an alert you can "
+        "**block** a source IP (drop its traffic) or **quarantine** it (flag for "
+        "review without dropping)."
+    )
+
+    _fw = response.firewall_backend()
+    if enforce_os_firewall and _fw != "none":
+        st.error(f"🔒 OS firewall enforcement is **ON** ({_fw}). Blocks will write real "
+                 "firewall rules on this host.")
+    else:
+        st.info("🧪 OS firewall enforcement is **OFF** — blocks are logical only "
+                "(recorded here, no traffic dropped). Toggle it in the sidebar to enforce.")
+
+    state = response.get_state()
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.markdown(f"""
+        <div class="metric-container">
+            <div class="metric-value danger">{len(state['blocked'])}</div>
+            <div class="metric-label">Blocked IPs</div>
+        </div>""", unsafe_allow_html=True)
+    with m2:
+        st.markdown(f"""
+        <div class="metric-container">
+            <div class="metric-value warn">{len(state['quarantined'])}</div>
+            <div class="metric-label">Quarantined IPs</div>
+        </div>""", unsafe_allow_html=True)
+    with m3:
+        logged = response.load_alerts(limit=1000)
+        st.markdown(f"""
+        <div class="metric-container">
+            <div class="metric-value safe">{len(logged)}</div>
+            <div class="metric-label">Alerts Logged</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # --- Manual action --------------------------------------------------- #
+    st.markdown("### ⚙️ Manual Action")
+    act_c1, act_c2, act_c3, act_c4 = st.columns([2, 2, 1, 1])
+    with act_c1:
+        manual_ip = st.text_input("Source IP", key="manual_ip", placeholder="e.g. 203.0.113.42")
+    with act_c2:
+        manual_reason = st.text_input("Reason / note", key="manual_reason",
+                                      placeholder="e.g. repeated exploit attempts")
+    with act_c3:
+        st.write("")
+        st.write("")
+        if st.button("⛔ Block", use_container_width=True, key="manual_block"):
+            ok, msg = response.block_ip(manual_ip, reason=manual_reason,
+                                        enforce=enforce_os_firewall)
+            (st.success if ok else st.error)(msg)
+            st.rerun()
+    with act_c4:
+        st.write("")
+        st.write("")
+        if st.button("🚧 Quarantine", use_container_width=True, key="manual_quar"):
+            ok, msg = response.quarantine_ip(manual_ip, reason=manual_reason)
+            (st.success if ok else st.error)(msg)
+            st.rerun()
+
+    st.markdown("---")
+
+    # --- Act on logged alerts -------------------------------------------- #
+    st.markdown("### 📋 Logged Alerts")
+    alerts_log = response.load_alerts(limit=500)
+    if not alerts_log:
+        st.info("No alerts logged yet. Run a PCAP audit or Live capture to generate alerts.")
+    else:
+        df_log = pd.DataFrame(alerts_log)
+        show_cols = [c for c in ['logged_at', 'src_ip', 'dst_ip', 'dst_port',
+                                 'protocol', 'attack_type', 'severity', 'confidence',
+                                 'policy_reason'] if c in df_log.columns]
+        st.dataframe(df_log[show_cols].tail(50).iloc[::-1], use_container_width=True)
+        st.download_button(
+            "⬇️ Export Alert Log (CSV)", df_log.to_csv(index=False),
+            file_name="nids_alert_log.csv", mime="text/csv")
+
+        # Quick action on the distinct source IPs seen in the log.
+        candidate_ips = [ip for ip in df_log.get('src_ip', pd.Series(dtype=str)).dropna().unique()
+                         if response.is_valid_ip(ip) and response.status_of(ip) == "ALLOWED"]
+        if candidate_ips:
+            st.markdown("#### Act on an alerting source IP")
+            pick_c1, pick_c2, pick_c3 = st.columns([2, 1, 1])
+            with pick_c1:
+                chosen_ip = st.selectbox("Source IP from alerts", candidate_ips, key="alert_ip_pick")
+            with pick_c2:
+                st.write("")
+                st.write("")
+                if st.button("⛔ Block IP", use_container_width=True, key="alert_block"):
+                    ok, msg = response.block_ip(chosen_ip, reason="Blocked from alert log",
+                                                enforce=enforce_os_firewall)
+                    (st.success if ok else st.error)(msg)
+                    st.rerun()
+            with pick_c3:
+                st.write("")
+                st.write("")
+                if st.button("🚧 Quarantine IP", use_container_width=True, key="alert_quar"):
+                    ok, msg = response.quarantine_ip(chosen_ip, reason="Quarantined from alert log")
+                    (st.success if ok else st.error)(msg)
+                    st.rerun()
+
+        if st.button("🗑️ Clear Alert Log"):
+            response.clear_alert_log()
+            st.rerun()
+
+    st.markdown("---")
+
+    # --- Blocklist ------------------------------------------------------- #
+    st.markdown("### ⛔ Blocklist")
+    if state['blocked']:
+        block_rows = [{'src_ip': ip, **meta} for ip, meta in state['blocked'].items()]
+        st.dataframe(pd.DataFrame(block_rows), use_container_width=True)
+        unblock_c1, unblock_c2 = st.columns([2, 1])
+        with unblock_c1:
+            ip_to_unblock = st.selectbox("Unblock IP", list(state['blocked'].keys()),
+                                         key="unblock_pick")
+        with unblock_c2:
+            st.write("")
+            st.write("")
+            if st.button("♻️ Unblock", use_container_width=True, key="do_unblock"):
+                ok, msg = response.unblock_ip(ip_to_unblock, enforce=enforce_os_firewall)
+                (st.success if ok else st.warning)(msg)
+                st.rerun()
+    else:
+        st.caption("No IPs are currently blocked.")
+
+    # --- Quarantine ------------------------------------------------------ #
+    st.markdown("### 🚧 Quarantine")
+    if state['quarantined']:
+        quar_rows = [{'src_ip': ip, **meta} for ip, meta in state['quarantined'].items()]
+        st.dataframe(pd.DataFrame(quar_rows), use_container_width=True)
+        rel_c1, rel_c2, rel_c3 = st.columns([2, 1, 1])
+        with rel_c1:
+            ip_to_release = st.selectbox("Quarantined IP", list(state['quarantined'].keys()),
+                                         key="release_pick")
+        with rel_c2:
+            st.write("")
+            st.write("")
+            if st.button("⛔ Escalate to Block", use_container_width=True, key="escalate_block"):
+                ok, msg = response.block_ip(ip_to_release, reason="Escalated from quarantine",
+                                            enforce=enforce_os_firewall)
+                (st.success if ok else st.error)(msg)
+                st.rerun()
+        with rel_c3:
+            st.write("")
+            st.write("")
+            if st.button("♻️ Release", use_container_width=True, key="do_release"):
+                ok, msg = response.release_quarantine(ip_to_release)
+                (st.success if ok else st.warning)(msg)
+                st.rerun()
+    else:
+        st.caption("No IPs are currently quarantined.")
 
 elif analysis_mode == "📊 Model Performance Report":
     st.subheader("📊 Model Evaluation on Held-Out UNSW-NB15 Test Data")

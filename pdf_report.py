@@ -12,11 +12,21 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.graphics.shapes import Drawing, String
+from reportlab.graphics.charts.piecharts import Pie
+from reportlab.graphics.charts.legends import Legend
 
 NAVY = colors.HexColor("#0F172A")
 BLUE = colors.HexColor("#2563EB")
 SLATE = colors.HexColor("#475569")
 LIGHT = colors.HexColor("#F1F5F9")
+
+# Categorical palette for chart slices, reused across every visualization so a
+# given category keeps a consistent look throughout the report.
+PALETTE = [colors.HexColor(c) for c in (
+    "#2563EB", "#EF4444", "#10B981", "#F59E0B", "#8B5CF6",
+    "#EC4899", "#06B6D4", "#84CC16", "#F97316", "#64748B",
+)]
 
 
 def _plain(value):
@@ -59,6 +69,77 @@ def _breakdown(title, values, styles):
         rows.append(["No data", "0", "0.0%"])
     return [Paragraph(title, styles["Section"]),
             _style_table(Table(rows, colWidths=[90*mm, 28*mm, 28*mm], repeatRows=1))]
+
+
+def _pie_cell(title, counter, styles, max_slices=8, width=360, height=150):
+    """Return [title, Drawing] for one pie chart with a side legend.
+
+    Slices beyond ``max_slices`` are aggregated into an "Other" wedge so a long
+    tail of rare categories does not turn the pie into confetti. Returns None
+    when there is nothing to plot.
+    """
+    total = sum(counter.values())
+    if total <= 0:
+        return None
+
+    items = counter.most_common(max_slices)
+    if len(counter) > max_slices:
+        other = total - sum(count for _, count in items)
+        if other > 0:
+            items.append(("Other", other))
+
+    drawing = Drawing(width, height)
+    pie = Pie()
+    pie.x, pie.y = 8, 12
+    pie.width = pie.height = height - 24
+    pie.data = [count for _, count in items]
+    pie.labels = None
+    pie.sideLabels = False
+    pie.simpleLabels = True
+    pie.slices.strokeColor = colors.white
+    pie.slices.strokeWidth = 0.75
+    for i in range(len(items)):
+        pie.slices[i].fillColor = PALETTE[i % len(PALETTE)]
+    drawing.add(pie)
+
+    legend = Legend()
+    legend.x = pie.width + 26
+    legend.y = height - 14
+    legend.alignment = "right"
+    legend.fontName = "Helvetica"
+    legend.fontSize = 8
+    legend.dxTextSpace = 5
+    legend.deltay = 12
+    legend.columnMaximum = 9
+    legend.colorNamePairs = [
+        (PALETTE[i % len(PALETTE)],
+         f"{_plain(name)}  {count} ({count / total * 100:.0f}%)")
+        for i, (name, count) in enumerate(items)
+    ]
+    drawing.add(legend)
+    return [Paragraph(title, styles["Section"]), drawing]
+
+
+def _chart_grid(cells):
+    """Lay a list of [title, Drawing] cells into a borderless two-column grid."""
+    cells = [c for c in cells if c]
+    if not cells:
+        return []
+    rows = []
+    for i in range(0, len(cells), 2):
+        pair = cells[i:i + 2]
+        if len(pair) == 1:
+            pair.append("")
+        rows.append(pair)
+    table = Table(rows, colWidths=[132 * mm, 132 * mm])
+    table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    return [table]
 
 
 def _footer(canvas, doc):
@@ -150,6 +231,25 @@ def generate_security_report(flows, alerts, analysis_mode="Network analysis",
         f"The intrusion ratio is <b>{ratio:.2f}%</b>, producing an overall review priority of "
         f"<b>{priority}</b>. Alerts should be correlated with firewall, endpoint, authentication, "
         f"and application logs before taking response actions.{truth_note}", styles["Body"])])
+
+    # Visual overview — pie charts summarizing the whole capture at a glance.
+    story.append(Paragraph("Visual overview", styles["Section"]))
+    composition = Counter({"Alerts": attack_count, "Non-alert flows": total - attack_count})
+    chart_cells = [
+        _pie_cell("Traffic composition", composition, styles),
+        _pie_cell("Protocol distribution",
+                  Counter(_plain(x.get("protocol", "Unknown")) for x in flows), styles),
+        _pie_cell("Attack categories",
+                  Counter(_plain(x.get("attack_type", "Unknown")) for x in alerts), styles),
+        _pie_cell("Alert severity",
+                  Counter(_plain(x.get("severity", "Unknown")) for x in alerts), styles),
+    ]
+    grid = _chart_grid(chart_cells)
+    if grid:
+        story.extend(grid)
+    else:
+        story.append(Paragraph("No data available to visualize.", styles["Body"]))
+    story.append(PageBreak())
 
     for section in _breakdown("Protocol distribution", Counter(_plain(x.get("protocol", "Unknown")) for x in flows), styles):
         story.append(section)

@@ -5,3 +5,6 @@ __pycache__/
 .ipynb_checkpoints/
 *.log
 .claude/
+# Response Center runtime state (per-host, not source)
+response_state.json
+alerts_log.jsonl

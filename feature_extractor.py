@@ -288,6 +288,51 @@ class FeatureExtractor:
         X = df[self.expected_features]
         return X, meta
 
+    def predict_precomputed(self, record):
+        """Predict from a row that already carries the model's features.
+
+        Used by the Simulator, where every UNSW-NB15 feature (including the
+        sliding-window ct_* counts) is already present in the dataset. The live
+        pipeline in ``predict_flow`` recomputes those counts from packet flow
+        state, which is correct for real capture but wrong for the simulator:
+        the demo assigns synthetic IPs, so recomputed counts are meaningless and
+        wreck both precision and recall. Feeding the dataset's real features here
+        lets the model perform as it actually does on held-out data.
+
+        ``record`` is a dict of the raw UNSW-NB15 columns. Returns the same shape
+        as ``predict_flow`` so downstream display code is unchanged.
+        """
+        record = dict(record)
+        # preprocess() keeps src/dst identifiers as metadata; dataset rows do not
+        # carry them (the simulator supplies synthetic display IPs separately), so
+        # provide placeholders. They do not enter the feature vector.
+        for key in ('src_ip', 'dst_ip', 'src_port', 'dst_port'):
+            record.setdefault(key, '-')
+        X, meta = self.preprocess(record)
+        prob = self.model.predict_proba(X)[0][1]
+        label = int(prob >= 0.5)
+
+        attack_cat = 'Normal'
+        attack_confirmed = True
+        if label == 1 and self.attack_model is not None:
+            cat_probs = self.attack_model.predict_proba(X)[0]
+            order = cat_probs.argsort()[::-1]
+            attack_confirmed = self.attack_classes[order[0]] != 'Normal'
+            for idx in order:
+                if self.attack_classes[idx] != 'Normal':
+                    attack_cat = self.attack_classes[idx]
+                    break
+
+        return {
+            'label': label,
+            'confidence': float(prob if label == 1 else 1.0 - prob),
+            'attack_probability': float(prob),
+            'attack_cat': attack_cat,
+            'attack_confirmed': bool(attack_confirmed),
+            'features': dict(record),
+            'meta': meta,
+        }
+
     def predict_flow(self, flow):
         """
         Full pipeline: extracts base features, calculates window counts, preprocesses,
@@ -316,9 +361,16 @@ class FeatureExtractor:
         # 'Normal' (the two models can disagree near the boundary), report the
         # most likely *attack* category instead.
         attack_cat = 'Normal'
+        # attack_confirmed = the multiclass categorizer independently agrees the
+        # flow is an attack (its most likely class is not 'Normal'). When the two
+        # models disagree near the boundary, the flow is a likely false positive;
+        # callers can require this agreement to raise precision. Defaults to True
+        # for label==0 (nothing to confirm) so it never blocks the normal path.
+        attack_confirmed = True
         if label == 1 and self.attack_model is not None:
             cat_probs = self.attack_model.predict_proba(X)[0]
             order = cat_probs.argsort()[::-1]
+            attack_confirmed = self.attack_classes[order[0]] != 'Normal'
             for idx in order:
                 if self.attack_classes[idx] != 'Normal':
                     attack_cat = self.attack_classes[idx]
@@ -329,6 +381,7 @@ class FeatureExtractor:
             'confidence': float(prob if label == 1 else 1.0 - prob),
             'attack_probability': float(prob),
             'attack_cat': attack_cat,
+            'attack_confirmed': bool(attack_confirmed),
             'features': flow_data,
             'meta': meta
         }
